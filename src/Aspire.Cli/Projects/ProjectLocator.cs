@@ -64,7 +64,7 @@ internal sealed class ProjectLocator(ILogger<ProjectLocator> logger, IDotNetCliR
                 logger.LogDebug("Checking project file {ProjectFile}", projectFile.FullName);
                 var information = await runner.GetAppHostInformationAsync(projectFile, new DotNetCliRunnerInvocationOptions(), ct);
 
-                if (information.ExitCode == 0 && information.IsAspireHost)
+                if (information.ExitCode == 0 && information.Info?.IsAspireHost == true)
                 {
                     logger.LogDebug("Found AppHost project file {ProjectFile} in {SearchDirectory}", projectFile.FullName, searchDirectory.FullName);
                     var relativePath = Path.GetRelativePath(executionContext.WorkingDirectory.FullName, projectFile.FullName);
@@ -249,7 +249,7 @@ internal sealed class ProjectLocator(ILogger<ProjectLocator> logger, IDotNetCliR
                         logger.LogDebug("Checking project file {ProjectFile}", candidateProject.FullName);
                         var information = await runner.GetAppHostInformationAsync(candidateProject, new DotNetCliRunnerInvocationOptions(), ct);
 
-                        if (information.ExitCode == 0 && information.IsAspireHost)
+                        if (information.ExitCode == 0 && information.Info?.IsAspireHost == true)
                         {
                             logger.LogDebug("Found AppHost project file {ProjectFile}", candidateProject.FullName);
                             var relativePath = Path.GetRelativePath(executionContext.WorkingDirectory.FullName, candidateProject.FullName);

@@ -7,6 +7,7 @@ using System.Globalization;
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Certificates;
 using Aspire.Cli.Configuration;
+using Aspire.Cli.Dcp;
 using Aspire.Cli.DotNet;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Projects;
@@ -40,6 +41,7 @@ internal sealed class RunCommand : BaseCommand
     private readonly ICliHostEnvironment _hostEnvironment;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RunCommand> _logger;
+    private readonly IDcpLauncher _dcpLauncher;
 
     public RunCommand(
         IDotNetCliRunner runner,
@@ -55,6 +57,7 @@ internal sealed class RunCommand : BaseCommand
         IServiceProvider serviceProvider,
         CliExecutionContext executionContext,
         ICliHostEnvironment hostEnvironment,
+        IDcpLauncher dcpLauncher,
         ILogger<RunCommand> logger,
         TimeProvider? timeProvider)
         : base("run", RunCommandStrings.Description, features, updateNotifier, executionContext, interactionService)
@@ -68,6 +71,7 @@ internal sealed class RunCommand : BaseCommand
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(sdkInstaller);
         ArgumentNullException.ThrowIfNull(hostEnvironment);
+        ArgumentNullException.ThrowIfNull(dcpLauncher);
         ArgumentNullException.ThrowIfNull(logger);
 
         _runner = runner;
@@ -81,6 +85,7 @@ internal sealed class RunCommand : BaseCommand
         _sdkInstaller = sdkInstaller;
         _features = features;
         _hostEnvironment = hostEnvironment;
+        _dcpLauncher = dcpLauncher;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -126,7 +131,7 @@ internal sealed class RunCommand : BaseCommand
         var buildOutputCollector = new OutputCollector();
         var runOutputCollector = new OutputCollector();
 
-        (bool IsCompatibleAppHost, bool SupportsBackchannel, string? AspireHostingVersion)? appHostCompatibilityCheck = null;
+        (bool IsCompatibleAppHost, bool SupportsBackchannel, AppHostInfo? Info)? appHostCompatibilityCheck = null;
         try
         {
             using var activity = _telemetry.ActivitySource.StartActivity(this.Name);
@@ -188,7 +193,14 @@ internal sealed class RunCommand : BaseCommand
             if (isSingleFileAppHost)
             {
                 // TODO: Add logic to read SDK version from *.cs file.
-                appHostCompatibilityCheck = (true, true, VersionHelper.GetDefaultTemplateVersion());
+                appHostCompatibilityCheck = (true, true, new AppHostInfo(
+                    IsAspireHost: true,
+                    AspireHostingVersion: VersionHelper.GetDefaultTemplateVersion(),
+                    DcpCliPath: null,
+                    DcpExtensionsPath: null,
+                    DcpBinPath: null,
+                    DashboardPath: null,
+                    ContainerRuntime: null));
             }
             else
             {
@@ -198,6 +210,40 @@ internal sealed class RunCommand : BaseCommand
             if (!appHostCompatibilityCheck?.IsCompatibleAppHost ?? throw new InvalidOperationException(RunCommandStrings.IsCompatibleAppHostIsNull))
             {
                 return ExitCodeConstants.FailedToDotnetRunAppHost;
+            }
+
+            // Launch CLI-owned DCP if the feature is enabled
+            DcpSession? dcpSession = null;
+            var dcpEnabled = _features.IsFeatureEnabled(KnownFeatures.DcpEnabled, defaultValue: false);
+            _logger.LogDebug("CLI-owned DCP feature enabled: {DcpEnabled}", dcpEnabled);
+
+            if (dcpEnabled)
+            {
+                var appHostInfo = appHostCompatibilityCheck?.Info;
+                _logger.LogDebug("DcpCliPath from AppHost: {DcpCliPath}", appHostInfo?.DcpCliPath ?? "(null)");
+
+                if (appHostInfo != null && !string.IsNullOrEmpty(appHostInfo.DcpCliPath))
+                {
+                    try
+                    {
+                        dcpSession = await InteractionService.ShowStatusAsync(
+                            "Starting DCP...",
+                            async () => await _dcpLauncher.LaunchAsync(appHostInfo, cancellationToken));
+
+                        // Pass kubeconfig path to AppHost so it knows to use CLI-owned DCP
+                        env["DCP_KUBECONFIG_PATH"] = dcpSession.KubeconfigPath;
+                        _logger.LogDebug("CLI-owned DCP started with kubeconfig at {KubeconfigPath}", dcpSession.KubeconfigPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        InteractionService.DisplayError($"Failed to start DCP: {ex.Message}");
+                        return ExitCodeConstants.FailedToDotnetRunAppHost;
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("CLI-owned DCP skipped: DcpCliPath not available");
+                }
             }
 
             var runOptions = new DotNetCliRunnerInvocationOptions
@@ -373,7 +419,7 @@ internal sealed class RunCommand : BaseCommand
         {
             return InteractionService.DisplayIncompatibleVersionError(
                 ex,
-                appHostCompatibilityCheck?.AspireHostingVersion ?? throw new InvalidOperationException(ErrorStrings.AspireHostingVersionNull)
+                appHostCompatibilityCheck?.Info?.AspireHostingVersion ?? throw new InvalidOperationException(ErrorStrings.AspireHostingVersionNull)
                 );
         }
         catch (CertificateServiceException ex)

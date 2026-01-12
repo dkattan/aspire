@@ -119,7 +119,7 @@ internal abstract class PipelineCommandBase : BaseCommand
         var buildOutputCollector = new OutputCollector();
         var operationOutputCollector = new OutputCollector();
 
-        (bool IsCompatibleAppHost, bool SupportsBackchannel, string? AspireHostingVersion)? appHostCompatibilityCheck = null;
+        (bool IsCompatibleAppHost, bool SupportsBackchannel, AppHostInfo? Info)? appHostCompatibilityCheck = null;
 
         try
         {
@@ -154,7 +154,14 @@ internal abstract class PipelineCommandBase : BaseCommand
             if (isSingleFileAppHost)
             {
                 // TODO: Add logic to read SDK version from *.cs file.
-                appHostCompatibilityCheck = (true, true, VersionHelper.GetDefaultTemplateVersion());
+                appHostCompatibilityCheck = (true, true, new AppHostInfo(
+                    IsAspireHost: true,
+                    AspireHostingVersion: VersionHelper.GetDefaultTemplateVersion(),
+                    DcpCliPath: null,
+                    DcpExtensionsPath: null,
+                    DcpBinPath: null,
+                    DashboardPath: null,
+                    ContainerRuntime: null));
             }
             else
             {
@@ -288,7 +295,7 @@ internal abstract class PipelineCommandBase : BaseCommand
             StopTerminalProgressBar();
             return InteractionService.DisplayIncompatibleVersionError(
                 ex,
-                appHostCompatibilityCheck?.AspireHostingVersion ?? throw new InvalidOperationException(ErrorStrings.AspireHostingVersionNull)
+                appHostCompatibilityCheck?.Info?.AspireHostingVersion ?? throw new InvalidOperationException(ErrorStrings.AspireHostingVersionNull)
                 );
         }
         catch (FailedToConnectBackchannelConnection ex)

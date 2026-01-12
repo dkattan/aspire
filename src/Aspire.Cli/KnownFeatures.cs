@@ -18,4 +18,5 @@ internal static class KnownFeatures
     public static string ShowAllTemplates => "showAllTemplates";
     public static string DotNetSdkInstallationEnabled => "dotnetSdkInstallationEnabled";
     public static string RunningInstanceDetectionEnabled => "runningInstanceDetectionEnabled";
+    public static string DcpEnabled => "dcpEnabled";
 }

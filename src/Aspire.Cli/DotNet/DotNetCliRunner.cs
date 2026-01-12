@@ -27,7 +27,7 @@ namespace Aspire.Cli.DotNet;
 
 internal interface IDotNetCliRunner
 {
-    Task<(int ExitCode, bool IsAspireHost, string? AspireHostingVersion)> GetAppHostInformationAsync(FileInfo projectFile, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken);
+    Task<(int ExitCode, AppHostInfo? Info)> GetAppHostInformationAsync(FileInfo projectFile, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken);
     Task<(int ExitCode, JsonDocument? Output)> GetProjectItemsAndPropertiesAsync(FileInfo projectFile, string[] items, string[] properties, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken);
     Task<int> RunAsync(FileInfo projectFile, bool watch, bool noBuild, string[] args, IDictionary<string, string>? env, TaskCompletionSource<IAppHostCliBackchannel>? backchannelCompletionSource, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken);
     Task<int> CheckHttpCertificateAsync(DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken);
@@ -52,6 +52,7 @@ internal sealed class DotNetCliRunnerInvocationOptions
     public bool StartDebugSession { get; set; }
     public bool NoExtensionLaunch { get; set; }
     public bool Debug { get; set; }
+    public bool SuppressOutputLogging { get; set; }
 }
 
 internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider serviceProvider, AspireCliTelemetry telemetry, IConfiguration configuration, IFeatures features, IInteractionService interactionService, CliExecutionContext executionContext, IDiskCache diskCache) : IDotNetCliRunner
@@ -73,87 +74,154 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
 
     // Cache expiry/max age handled inside DiskCache implementation.
 
-    public async Task<(int ExitCode, bool IsAspireHost, string? AspireHostingVersion)> GetAppHostInformationAsync(FileInfo projectFile, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken)
+    public async Task<(int ExitCode, AppHostInfo? Info)> GetAppHostInformationAsync(FileInfo projectFile, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken)
     {
         using var activity = telemetry.ActivitySource.StartActivity();
 
-        // Get both properties and PackageReference items to determine Aspire.Hosting version
+        // Get properties including DCP paths
         var (exitCode, jsonDocument) = await GetProjectItemsAndPropertiesAsync(
             projectFile,
             ["PackageReference", "AspireProjectOrPackageReference"],
-            ["IsAspireHost", "AspireHostingSDKVersion"],
+            ["IsAspireHost", "AspireHostingSDKVersion", "DcpCliPath", "DcpExtensionsDir", "DcpBinDir", "DcpDir", "AspireDashboardPath", "ContainerRuntime"],
             options,
             cancellationToken);
 
-        if (exitCode == 0 && jsonDocument != null)
+        if (exitCode != 0 || jsonDocument == null)
         {
-            var rootElement = jsonDocument.RootElement;
+            return (exitCode, null);
+        }
 
-            if (!rootElement.TryGetProperty("Properties", out var properties))
+        var rootElement = jsonDocument.RootElement;
+
+        if (!rootElement.TryGetProperty("Properties", out var properties))
+        {
+            return (exitCode, null);
+        }
+
+        if (!properties.TryGetProperty("IsAspireHost", out var isAspireHostElement) ||
+            isAspireHostElement.GetString() != "true")
+        {
+            return (exitCode, new AppHostInfo(
+                IsAspireHost: false,
+                AspireHostingVersion: null,
+                DcpCliPath: null,
+                DcpExtensionsPath: null,
+                DcpBinPath: null,
+                DashboardPath: null,
+                ContainerRuntime: null));
+        }
+
+        // Extract Aspire.Hosting version from PackageReference items
+        string? aspireHostingVersion = null;
+        if (rootElement.TryGetProperty("Items", out var items))
+        {
+            if (items.TryGetProperty("PackageReference", out var packageReferences))
             {
-                return (exitCode, false, null);
-            }
-
-            if (!properties.TryGetProperty("IsAspireHost", out var isAspireHostElement))
-            {
-                return (exitCode, false, null);
-            }
-
-            if (isAspireHostElement.GetString() == "true")
-            {
-                // Try to get Aspire.Hosting version from PackageReference items
-                string? aspireHostingVersion = null;
-
-                if (rootElement.TryGetProperty("Items", out var items))
+                foreach (var packageRef in packageReferences.EnumerateArray())
                 {
-                    // Check PackageReference items first
-                    if (items.TryGetProperty("PackageReference", out var packageReferences))
+                    if (packageRef.TryGetProperty("Identity", out var identity) &&
+                        identity.GetString() == "Aspire.Hosting" &&
+                        packageRef.TryGetProperty("Version", out var version))
                     {
-                        foreach (var packageRef in packageReferences.EnumerateArray())
-                        {
-                            if (packageRef.TryGetProperty("Identity", out var identity) &&
-                                identity.GetString() == "Aspire.Hosting" &&
-                                packageRef.TryGetProperty("Version", out var version))
-                            {
-                                aspireHostingVersion = version.GetString();
-                                break;
-                            }
-                        }
-                    }
-
-                    // Fallback to AspireProjectOrPackageReference items if not found
-                    if (aspireHostingVersion == null && items.TryGetProperty("AspireProjectOrPackageReference", out var aspireProjectOrPackageReferences))
-                    {
-                        foreach (var aspireRef in aspireProjectOrPackageReferences.EnumerateArray())
-                        {
-                            if (aspireRef.TryGetProperty("Identity", out var identity) &&
-                                identity.GetString() == "Aspire.Hosting" &&
-                                aspireRef.TryGetProperty("Version", out var version))
-                            {
-                                aspireHostingVersion = version.GetString();
-                                break;
-                            }
-                        }
+                        aspireHostingVersion = version.GetString();
+                        break;
                     }
                 }
+            }
 
-                // If no package version found, fallback to SDK version
-                if (aspireHostingVersion == null && properties.TryGetProperty("AspireHostingSDKVersion", out var aspireHostingSdkVersionElement))
+            if (aspireHostingVersion == null && items.TryGetProperty("AspireProjectOrPackageReference", out var aspireProjectOrPackageReferences))
+            {
+                foreach (var aspireRef in aspireProjectOrPackageReferences.EnumerateArray())
                 {
-                    aspireHostingVersion = aspireHostingSdkVersionElement.GetString();
+                    if (aspireRef.TryGetProperty("Identity", out var identity) &&
+                        identity.GetString() == "Aspire.Hosting" &&
+                        aspireRef.TryGetProperty("Version", out var version))
+                    {
+                        aspireHostingVersion = version.GetString();
+                        break;
+                    }
                 }
+            }
+        }
 
-                return (exitCode, true, aspireHostingVersion);
+        if (aspireHostingVersion == null && properties.TryGetProperty("AspireHostingSDKVersion", out var aspireHostingSdkVersionElement))
+        {
+            aspireHostingVersion = aspireHostingSdkVersionElement.GetString();
+        }
+
+        // Extract DCP paths
+        string? dcpCliPath = null;
+        string? dcpExtensionsPath = null;
+        string? dcpBinPath = null;
+        string? dashboardPath = null;
+        string? containerRuntime = null;
+
+        if (properties.TryGetProperty("DcpCliPath", out var dcpCliPathElement))
+        {
+            dcpCliPath = dcpCliPathElement.GetString();
+        }
+        if (properties.TryGetProperty("DcpExtensionsDir", out var dcpExtensionsPathElement))
+        {
+            dcpExtensionsPath = dcpExtensionsPathElement.GetString();
+        }
+        if (properties.TryGetProperty("DcpBinDir", out var dcpBinPathElement))
+        {
+            dcpBinPath = dcpBinPathElement.GetString();
+        }
+        if (properties.TryGetProperty("AspireDashboardPath", out var dashboardPathElement))
+        {
+            dashboardPath = dashboardPathElement.GetString();
+        }
+        if (properties.TryGetProperty("ContainerRuntime", out var containerRuntimeElement))
+        {
+            containerRuntime = containerRuntimeElement.GetString();
+        }
+
+        // If DcpCliPath is not set but DcpDir is (e.g., local repo build), construct paths from DcpDir
+        if (string.IsNullOrEmpty(dcpCliPath))
+        {
+            logger.LogDebug("DcpCliPath not set from MSBuild, checking DcpDir property");
+
+            if (properties.TryGetProperty("DcpDir", out var dcpDirElement))
+            {
+                var dcpDir = dcpDirElement.GetString();
+                logger.LogDebug("DcpDir from MSBuild: {DcpDir}", dcpDir ?? "(null)");
+
+                if (!string.IsNullOrEmpty(dcpDir))
+                {
+                    if (Directory.Exists(dcpDir))
+                    {
+                        // Construct paths (matching Aspire.Hosting.AppHost.in.targets logic)
+                        dcpCliPath = Path.Combine(dcpDir, "dcp");
+                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        {
+                            dcpCliPath += ".exe";
+                        }
+                        dcpExtensionsPath = Path.Combine(dcpDir, "ext");
+                        dcpBinPath = Path.Combine(dcpExtensionsPath, "bin");
+
+                        logger.LogDebug("Resolved DcpCliPath from DcpDir: {DcpCliPath}", dcpCliPath);
+                    }
+                    else
+                    {
+                        logger.LogDebug("DcpDir does not exist: {DcpDir}", dcpDir);
+                    }
+                }
             }
             else
             {
-                return (exitCode, false, null);
+                logger.LogDebug("DcpDir property not found in MSBuild output");
             }
         }
-        else
-        {
-            return (exitCode, false, null);
-        }
+
+        return (exitCode, new AppHostInfo(
+            IsAspireHost: true,
+            AspireHostingVersion: aspireHostingVersion,
+            DcpCliPath: dcpCliPath,
+            DcpExtensionsPath: dcpExtensionsPath,
+            DcpBinPath: dcpBinPath,
+            DashboardPath: dashboardPath,
+            ContainerRuntime: containerRuntime));
     }
 
     public async Task<(int ExitCode, JsonDocument? Output)> GetProjectItemsAndPropertiesAsync(FileInfo projectFile, string[] items, string[] properties, DotNetCliRunnerInvocationOptions options, CancellationToken cancellationToken)
@@ -606,6 +674,7 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
                 "stdout",
                 process,
                 options.StandardOutputCallback,
+                options.SuppressOutputLogging,
                 cancellationToken);
             }, cancellationToken);
 
@@ -615,6 +684,7 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
                 "stderr",
                 process,
                 options.StandardErrorCallback,
+                options.SuppressOutputLogging,
                 cancellationToken);
             }, cancellationToken);
 
@@ -647,24 +717,30 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
         await Task.WhenAll([pendingStdoutStreamForwarder, pendingStderrStreamForwarder]);
         return process.ExitCode;
 
-        async Task ForwardStreamToLoggerAsync(StreamReader reader, string identifier, Process process, Action<string>? lineCallback, CancellationToken cancellationToken)
+        async Task ForwardStreamToLoggerAsync(StreamReader reader, string identifier, Process process, Action<string>? lineCallback, bool suppressLogging, CancellationToken cancellationToken)
         {
-            logger.LogDebug(
-                "Starting to forward stream with identifier '{Identifier}' on process '{ProcessId}' to logger",
-                identifier,
-                process.Id
-                );
+            if (!suppressLogging)
+            {
+                logger.LogDebug(
+                    "Starting to forward stream with identifier '{Identifier}' on process '{ProcessId}' to logger",
+                    identifier,
+                    process.Id
+                    );
+            }
 
             string? line;
             while (!cancellationToken.IsCancellationRequested &&
                 (line = await reader.ReadLineAsync(cancellationToken)) is not null)
             {
-                logger.LogDebug(
-                    "dotnet({ProcessId}) {Identifier}: {Line}",
-                    process.Id,
-                    identifier,
-                    line
-                    );
+                if (!suppressLogging)
+                {
+                    logger.LogDebug(
+                        "dotnet({ProcessId}) {Identifier}: {Line}",
+                        process.Id,
+                        identifier,
+                        line
+                        );
+                }
                 lineCallback?.Invoke(line!);
             }
         }
@@ -995,19 +1071,14 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
         }
 
         var stdoutBuilder = new StringBuilder();
-        var existingStandardOutputCallback = options.StandardOutputCallback; // Preserve the existing callback if it exists.
-        options.StandardOutputCallback = (line) =>
-        {
-            stdoutBuilder.AppendLine(line);
-            existingStandardOutputCallback?.Invoke(line);
-        };
-
         var stderrBuilder = new StringBuilder();
-        var existingStandardErrorCallback = options.StandardErrorCallback; // Preserve the existing callback if it exists.
-        options.StandardErrorCallback = (line) =>
+
+        // Use a separate options object to avoid logging noisy package search output
+        var searchOptions = new DotNetCliRunnerInvocationOptions
         {
-            stderrBuilder.AppendLine(line);
-            existingStandardErrorCallback?.Invoke(line);
+            StandardOutputCallback = (line) => stdoutBuilder.AppendLine(line),
+            StandardErrorCallback = (line) => stderrBuilder.AppendLine(line),
+            SuppressOutputLogging = true
         };
 
         var result = await ExecuteAsync(
@@ -1016,7 +1087,7 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
             projectFile: null,
             workingDirectory: workingDirectory!,
             backchannelCompletionSource: null,
-            options: options,
+            options: searchOptions,
             cancellationToken: cancellationToken);
 
         var stdout = stdoutBuilder.ToString();
@@ -1230,4 +1301,5 @@ internal class DotNetCliRunner(ILogger<DotNetCliRunner> logger, IServiceProvider
             logger.LogDebug("Using private SDK installation at {SdkPath}", sdkInstallPath);
         }
     }
+
 }
