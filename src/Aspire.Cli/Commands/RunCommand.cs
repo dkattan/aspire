@@ -42,6 +42,7 @@ internal sealed class RunCommand : BaseCommand
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RunCommand> _logger;
     private readonly IDcpLauncher _dcpLauncher;
+    private readonly IDcpClient _dcpClient;
 
     public RunCommand(
         IDotNetCliRunner runner,
@@ -58,6 +59,7 @@ internal sealed class RunCommand : BaseCommand
         CliExecutionContext executionContext,
         ICliHostEnvironment hostEnvironment,
         IDcpLauncher dcpLauncher,
+        IDcpClient dcpClient,
         ILogger<RunCommand> logger,
         TimeProvider? timeProvider)
         : base("run", RunCommandStrings.Description, features, updateNotifier, executionContext, interactionService)
@@ -72,6 +74,7 @@ internal sealed class RunCommand : BaseCommand
         ArgumentNullException.ThrowIfNull(sdkInstaller);
         ArgumentNullException.ThrowIfNull(hostEnvironment);
         ArgumentNullException.ThrowIfNull(dcpLauncher);
+        ArgumentNullException.ThrowIfNull(dcpClient);
         ArgumentNullException.ThrowIfNull(logger);
 
         _runner = runner;
@@ -86,6 +89,7 @@ internal sealed class RunCommand : BaseCommand
         _features = features;
         _hostEnvironment = hostEnvironment;
         _dcpLauncher = dcpLauncher;
+        _dcpClient = dcpClient;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -233,6 +237,14 @@ internal sealed class RunCommand : BaseCommand
                         // Pass kubeconfig path to AppHost so it knows to use CLI-owned DCP
                         env["DCP_KUBECONFIG_PATH"] = dcpSession.KubeconfigPath;
                         _logger.LogDebug("CLI-owned DCP started with kubeconfig at {KubeconfigPath}", dcpSession.KubeconfigPath);
+
+                        // Create CLI-owned dashboard via DCP
+                        await CreateCliOwnedDashboardAsync(
+                            appHostInfo,
+                            effectiveAppHostFile,
+                            dcpSession,
+                            env,
+                            cancellationToken);
                     }
                     catch (Exception ex)
                     {
@@ -246,12 +258,17 @@ internal sealed class RunCommand : BaseCommand
                 }
             }
 
+            // When CLI owns the dashboard, we need to use --no-launch-profile to ensure
+            // our environment variables are passed to the AppHost (otherwise dotnet run may not inherit them)
+            var useNoLaunchProfile = env.ContainsKey("ASPIRE_CLI_DASHBOARD_MODE");
+
             var runOptions = new DotNetCliRunnerInvocationOptions
             {
                 StandardOutputCallback = runOutputCollector.AppendOutput,
                 StandardErrorCallback = runOutputCollector.AppendError,
                 StartDebugSession = startDebugSession,
-                Debug = debug
+                Debug = debug,
+                NoLaunchProfile = useNoLaunchProfile
             };
 
             var backchannelCompletitionSource = new TaskCompletionSource<IAppHostCliBackchannel>();
@@ -659,5 +676,225 @@ internal sealed class RunCommand : BaseCommand
 
         // Timeout reached
         return false;
+    }
+
+    private async Task CreateCliOwnedDashboardAsync(
+        AppHostInfo appHostInfo,
+        FileInfo appHostProjectFile,
+        DcpSession dcpSession,
+        Dictionary<string, string> env,
+        CancellationToken cancellationToken)
+    {
+        // Read launchSettings.json from AppHost project to get dashboard configuration
+        var launchSettings = LaunchSettingsReader.ReadLaunchSettings(appHostProjectFile.FullName);
+        var launchProfile = LaunchSettingsReader.GetEffectiveLaunchProfile(launchSettings);
+
+        if (launchProfile == null)
+        {
+            _logger.LogDebug("Could not find launch profile in launchSettings.json. Dashboard will be launched by AppHost.");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(appHostInfo.DashboardPath))
+        {
+            _logger.LogDebug("Dashboard path not available. Dashboard will be launched by AppHost.");
+            return;
+        }
+
+        var profileEnv = launchProfile.EnvironmentVariables;
+
+        // Get configuration from launchSettings
+        var resourceServiceUrl = profileEnv.GetValueOrDefault("ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL");
+        var otlpGrpcUrl = profileEnv.GetValueOrDefault("ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL");
+        var otlpHttpUrl = profileEnv.GetValueOrDefault("ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL");
+        var mcpUrl = profileEnv.GetValueOrDefault("ASPIRE_DASHBOARD_MCP_ENDPOINT_URL");
+        var aspnetEnvironment = profileEnv.GetValueOrDefault("ASPNETCORE_ENVIRONMENT") ?? "Production";
+
+        if (string.IsNullOrEmpty(resourceServiceUrl))
+        {
+            _logger.LogDebug("ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL not found in launchSettings. Dashboard will be launched by AppHost.");
+            return;
+        }
+
+        // Generate tokens/keys that will be shared between CLI, AppHost, and Dashboard
+        var browserToken = TokenGenerator.GenerateToken();
+        var resourceServiceApiKey = TokenGenerator.GenerateToken();
+        var otlpApiKey = TokenGenerator.GenerateToken();
+        var mcpApiKey = TokenGenerator.GenerateToken();
+
+        // Dashboard frontend URL - use applicationUrl from launchSettings or default
+        var dashboardFrontendUrl = launchProfile.ApplicationUrl ?? "http://localhost:18888";
+        // Take just the first URL if there are multiple
+        if (dashboardFrontendUrl.Contains(';'))
+        {
+            dashboardFrontendUrl = dashboardFrontendUrl.Split(';')[0];
+        }
+
+        _logger.LogDebug("Connecting to DCP at {KubeconfigPath}", dcpSession.KubeconfigPath);
+        await _dcpClient.ConnectAsync(dcpSession.KubeconfigPath, cancellationToken);
+
+        // Create Service resources for dashboard endpoints
+        // This is how DCP normally tracks endpoint allocation
+        // Services will become Ready once the dashboard binds to their ports
+        await CreateDashboardServiceAsync("aspire-dashboard-http", dashboardFrontendUrl, cancellationToken);
+
+        if (!string.IsNullOrEmpty(otlpGrpcUrl))
+        {
+            await CreateDashboardServiceAsync("aspire-dashboard-otlp-grpc", otlpGrpcUrl, cancellationToken);
+        }
+
+        if (!string.IsNullOrEmpty(otlpHttpUrl))
+        {
+            await CreateDashboardServiceAsync("aspire-dashboard-otlp-http", otlpHttpUrl, cancellationToken);
+        }
+
+        if (!string.IsNullOrEmpty(mcpUrl))
+        {
+            await CreateDashboardServiceAsync("aspire-dashboard-mcp", mcpUrl, cancellationToken);
+        }
+
+        // Build dashboard environment variables using the URLs from launchSettings
+        // The Services ensure DCP tracks these endpoints properly
+        var dashboardEnv = new Dictionary<string, string>
+        {
+            // Core URLs
+            ["ASPNETCORE_URLS"] = dashboardFrontendUrl,
+            ["ASPNETCORE_ENVIRONMENT"] = aspnetEnvironment,
+            ["DOTNET_RESOURCE_SERVICE_ENDPOINT_URL"] = resourceServiceUrl,
+
+            // Frontend auth
+            ["DASHBOARD__FRONTEND__AUTHMODE"] = "BrowserToken",
+            ["DASHBOARD__FRONTEND__BROWSERTOKEN"] = browserToken,
+
+            // Resource service client auth
+            ["DASHBOARD__RESOURCESERVICECLIENT__AUTHMODE"] = "ApiKey",
+            ["DASHBOARD__RESOURCESERVICECLIENT__APIKEY"] = resourceServiceApiKey,
+
+            // Logging
+            ["LOGGING__CONSOLE__FORMATTERNAME"] = "json"
+        };
+
+        // Add OTLP endpoints if configured
+        if (!string.IsNullOrEmpty(otlpGrpcUrl))
+        {
+            dashboardEnv["ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL"] = otlpGrpcUrl;
+            dashboardEnv["DASHBOARD__OTLP__AUTHMODE"] = "ApiKey";
+            dashboardEnv["DASHBOARD__OTLP__PRIMARYAPIKEY"] = otlpApiKey;
+        }
+
+        if (!string.IsNullOrEmpty(otlpHttpUrl))
+        {
+            dashboardEnv["ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL"] = otlpHttpUrl;
+        }
+
+        // Add MCP endpoint if configured
+        if (!string.IsNullOrEmpty(mcpUrl))
+        {
+            dashboardEnv["ASPIRE_DASHBOARD_MCP_ENDPOINT_URL"] = mcpUrl;
+            dashboardEnv["DASHBOARD__MCP__AUTHMODE"] = "ApiKey";
+            dashboardEnv["DASHBOARD__MCP__PRIMARYAPIKEY"] = mcpApiKey;
+            dashboardEnv["DASHBOARD__MCP__USECLIMCP"] = "true";
+        }
+
+        _logger.LogDebug("Creating dashboard executable in DCP");
+
+        var dashboardSpec = new DcpExecutableSpec(
+            Name: "aspire-dashboard",
+            ExecutablePath: "dotnet",
+            WorkingDirectory: Path.GetDirectoryName(appHostInfo.DashboardPath),
+            Args: [appHostInfo.DashboardPath],
+            Env: dashboardEnv);
+
+        await _dcpClient.CreateExecutableAsync(dashboardSpec, cancellationToken);
+
+        // Wait for dashboard to start running
+        await foreach (var execInfo in _dcpClient.WatchExecutableAsync("aspire-dashboard", cancellationToken))
+        {
+            _logger.LogDebug("Dashboard state: {State}", execInfo.State);
+            if (execInfo.State == "Running")
+            {
+                _logger.LogDebug("Dashboard is running with PID {Pid}", execInfo.Pid);
+                break;
+            }
+            else if (execInfo.State is "FailedToStart" or "Terminated" or "Finished")
+            {
+                _logger.LogWarning("Dashboard failed to start with state {State}", execInfo.State);
+                break;
+            }
+        }
+
+        // Configure AppHost with CLI dashboard info so backchannel returns correct URL
+        env["ASPIRE_CLI_DASHBOARD_MODE"] = "true";
+        env["ASPIRE_CLI_DASHBOARD_URL"] = dashboardFrontendUrl;
+        env["ASPIRE_CLI_DASHBOARD_TOKEN"] = browserToken;
+
+        // Copy essential env vars from launchSettings since we use --no-launch-profile
+        env["ASPNETCORE_ENVIRONMENT"] = aspnetEnvironment;
+        env["DOTNET_ENVIRONMENT"] = aspnetEnvironment;
+
+        // Set ASPNETCORE_URLS from applicationUrl - AppHost needs this for Kestrel binding
+        if (!string.IsNullOrEmpty(launchProfile.ApplicationUrl))
+        {
+            env["ASPNETCORE_URLS"] = launchProfile.ApplicationUrl;
+        }
+
+        if (!string.IsNullOrEmpty(resourceServiceUrl))
+        {
+            env["ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL"] = resourceServiceUrl;
+        }
+        if (!string.IsNullOrEmpty(otlpGrpcUrl))
+        {
+            env["ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL"] = otlpGrpcUrl;
+        }
+        if (!string.IsNullOrEmpty(otlpHttpUrl))
+        {
+            env["ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL"] = otlpHttpUrl;
+        }
+        if (!string.IsNullOrEmpty(mcpUrl))
+        {
+            env["ASPIRE_DASHBOARD_MCP_ENDPOINT_URL"] = mcpUrl;
+        }
+
+        // Configure AppHost with same API keys so it can authenticate with dashboard
+        env["AppHost:ResourceService:AuthMode"] = "ApiKey";
+        env["AppHost:ResourceService:ApiKey"] = resourceServiceApiKey;
+
+        if (!string.IsNullOrEmpty(otlpGrpcUrl))
+        {
+            env["AppHost:OtlpApiKey"] = otlpApiKey;
+        }
+
+        if (!string.IsNullOrEmpty(mcpUrl))
+        {
+            env["AppHost:McpApiKey"] = mcpApiKey;
+        }
+
+        _logger.LogDebug("CLI-owned dashboard configured at {DashboardUrl}", dashboardFrontendUrl);
+    }
+
+    private async Task<DcpServiceResource?> CreateDashboardServiceAsync(
+        string serviceName,
+        string url,
+        CancellationToken cancellationToken)
+    {
+        // Parse URL to get port and scheme
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            _logger.LogWarning("Could not parse URL {Url} for service {ServiceName}", url, serviceName);
+            return null;
+        }
+
+        var port = uri.Port > 0 ? uri.Port : (uri.Scheme == "https" ? 443 : 80);
+
+        _logger.LogDebug("Creating service {ServiceName} for {Url} on port {Port}", serviceName, url, port);
+
+        var serviceSpec = new DcpServiceSpec(
+            Name: serviceName,
+            Port: port,
+            Address: "localhost",
+            Protocol: "TCP",
+            AddressAllocationMode: "Localhost");
+
+        return await _dcpClient.CreateServiceAsync(serviceSpec, cancellationToken);
     }
 }

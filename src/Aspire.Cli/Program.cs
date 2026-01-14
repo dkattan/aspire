@@ -172,6 +172,7 @@ public class Program
         // DCP services for CLI-owned DCP mode
         builder.Services.AddSingleton<IDcpSessionManager, DcpSessionManager>();
         builder.Services.AddSingleton<IDcpLauncher, DcpLauncher>();
+        builder.Services.AddTransient<IDcpClient, DcpClient>();
 
         builder.Services.AddSingleton<ICliUpdateNotifier, CliUpdateNotifier>();
         builder.Services.AddSingleton<IPackagingService, PackagingService>();
