@@ -44,6 +44,9 @@ type ContainerResourceHandle = Handle<'Aspire.Hosting/Aspire.Hosting.Application
 /** Handle to EndpointReference */
 type EndpointReferenceHandle = Handle<'Aspire.Hosting/Aspire.Hosting.ApplicationModel.EndpointReference'>;
 
+/** Handle to EndpointReferenceExpression */
+type EndpointReferenceExpressionHandle = Handle<'Aspire.Hosting/Aspire.Hosting.ApplicationModel.EndpointReferenceExpression'>;
+
 /** Handle to EnvironmentCallbackContext */
 type EnvironmentCallbackContextHandle = Handle<'Aspire.Hosting/Aspire.Hosting.ApplicationModel.EnvironmentCallbackContext'>;
 
@@ -265,6 +268,14 @@ export interface WithHttpHealthCheckOptions {
     endpointName?: string;
 }
 
+export interface WithHttpsEndpointOptions {
+    port?: number;
+    targetPort?: number;
+    name?: string;
+    env?: string;
+    isProxied?: boolean;
+}
+
 export interface WithOptionalCallbackOptions {
     callback?: (arg: TestCallbackContext) => Promise<void>;
 }
@@ -284,7 +295,6 @@ export interface WithReferenceOptions {
 }
 
 export interface WithVolumeOptions {
-    name?: string;
     isReadOnly?: boolean;
 }
 
@@ -525,6 +535,81 @@ export class EndpointReference {
         get: async (): Promise<string> => {
             return await this._client.invokeCapability<string>(
                 'Aspire.Hosting.ApplicationModel/EndpointReference.url',
+                { context: this._handle }
+            );
+        },
+    };
+
+    /** Invokes the Property method */
+    async property(property: EndpointProperty): Promise<EndpointReferenceExpression> {
+        const rpcArgs: Record<string, unknown> = { context: this._handle, property };
+        return await this._client.invokeCapability<EndpointReferenceExpression>(
+            'Aspire.Hosting.ApplicationModel/EndpointReference.property',
+            rpcArgs
+        );
+    }
+
+}
+
+/**
+ * Thenable wrapper for EndpointReference that enables fluent chaining.
+ */
+export class EndpointReferencePromise implements PromiseLike<EndpointReference> {
+    constructor(private _promise: Promise<EndpointReference>) {}
+
+    then<TResult1 = EndpointReference, TResult2 = never>(
+        onfulfilled?: ((value: EndpointReference) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+    ): PromiseLike<TResult1 | TResult2> {
+        return this._promise.then(onfulfilled, onrejected);
+    }
+
+    /** Invokes the Property method */
+    property(property: EndpointProperty): Promise<EndpointReferenceExpression> {
+        return this._promise.then(obj => obj.property(property));
+    }
+
+}
+
+// ============================================================================
+// EndpointReferenceExpression
+// ============================================================================
+
+/**
+ * Type class for EndpointReferenceExpression.
+ */
+export class EndpointReferenceExpression {
+    constructor(private _handle: EndpointReferenceExpressionHandle, private _client: AspireClientRpc) {}
+
+    /** Serialize for JSON-RPC transport */
+    toJSON(): MarshalledHandle { return this._handle.toJSON(); }
+
+    /** Gets the Endpoint property */
+    endpoint = {
+        get: async (): Promise<EndpointReference> => {
+            const handle = await this._client.invokeCapability<EndpointReferenceHandle>(
+                'Aspire.Hosting.ApplicationModel/EndpointReferenceExpression.endpoint',
+                { context: this._handle }
+            );
+            return new EndpointReference(handle, this._client);
+        },
+    };
+
+    /** Gets the Property property */
+    property = {
+        get: async (): Promise<EndpointProperty> => {
+            return await this._client.invokeCapability<EndpointProperty>(
+                'Aspire.Hosting.ApplicationModel/EndpointReferenceExpression.property',
+                { context: this._handle }
+            );
+        },
+    };
+
+    /** Gets the ValueExpression property */
+    valueExpression = {
+        get: async (): Promise<string> => {
+            return await this._client.invokeCapability<string>(
+                'Aspire.Hosting.ApplicationModel/EndpointReferenceExpression.valueExpression',
                 { context: this._handle }
             );
         },
@@ -1210,6 +1295,31 @@ export class ContainerResource extends ResourceBuilderBase<ContainerResourceHand
     }
 
     /** @internal */
+    async _withHttpsEndpointInternal(port?: number, targetPort?: number, name?: string, env?: string, isProxied?: boolean): Promise<ContainerResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle };
+        if (port !== undefined) rpcArgs.port = port;
+        if (targetPort !== undefined) rpcArgs.targetPort = targetPort;
+        if (name !== undefined) rpcArgs.name = name;
+        if (env !== undefined) rpcArgs.env = env;
+        if (isProxied !== undefined) rpcArgs.isProxied = isProxied;
+        const result = await this._client.invokeCapability<ContainerResourceHandle>(
+            'Aspire.Hosting/withHttpsEndpoint',
+            rpcArgs
+        );
+        return new ContainerResource(result, this._client);
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ContainerResourcePromise {
+        const port = options?.port;
+        const targetPort = options?.targetPort;
+        const name = options?.name;
+        const env = options?.env;
+        const isProxied = options?.isProxied;
+        return new ContainerResourcePromise(this._withHttpsEndpointInternal(port, targetPort, name, env, isProxied));
+    }
+
+    /** @internal */
     async _withExternalHttpEndpointsInternal(): Promise<ContainerResource> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle };
         const result = await this._client.invokeCapability<ContainerResourceHandle>(
@@ -1617,6 +1727,11 @@ export class ContainerResourcePromise implements PromiseLike<ContainerResource> 
         return new ContainerResourcePromise(this._promise.then(obj => obj.withHttpEndpoint(options)));
     }
 
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ContainerResourcePromise {
+        return new ContainerResourcePromise(this._promise.then(obj => obj.withHttpsEndpoint(options)));
+    }
+
     /** Makes HTTP endpoints externally accessible */
     withExternalHttpEndpoints(): ContainerResourcePromise {
         return new ContainerResourcePromise(this._promise.then(obj => obj.withExternalHttpEndpoints()));
@@ -1880,6 +1995,31 @@ export class ExecutableResource extends ResourceBuilderBase<ExecutableResourceHa
         const env = options?.env;
         const isProxied = options?.isProxied;
         return new ExecutableResourcePromise(this._withHttpEndpointInternal(port, targetPort, name, env, isProxied));
+    }
+
+    /** @internal */
+    async _withHttpsEndpointInternal(port?: number, targetPort?: number, name?: string, env?: string, isProxied?: boolean): Promise<ExecutableResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle };
+        if (port !== undefined) rpcArgs.port = port;
+        if (targetPort !== undefined) rpcArgs.targetPort = targetPort;
+        if (name !== undefined) rpcArgs.name = name;
+        if (env !== undefined) rpcArgs.env = env;
+        if (isProxied !== undefined) rpcArgs.isProxied = isProxied;
+        const result = await this._client.invokeCapability<ExecutableResourceHandle>(
+            'Aspire.Hosting/withHttpsEndpoint',
+            rpcArgs
+        );
+        return new ExecutableResource(result, this._client);
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ExecutableResourcePromise {
+        const port = options?.port;
+        const targetPort = options?.targetPort;
+        const name = options?.name;
+        const env = options?.env;
+        const isProxied = options?.isProxied;
+        return new ExecutableResourcePromise(this._withHttpsEndpointInternal(port, targetPort, name, env, isProxied));
     }
 
     /** @internal */
@@ -2288,6 +2428,11 @@ export class ExecutableResourcePromise implements PromiseLike<ExecutableResource
     /** Adds an HTTP endpoint */
     withHttpEndpoint(options?: WithHttpEndpointOptions): ExecutableResourcePromise {
         return new ExecutableResourcePromise(this._promise.then(obj => obj.withHttpEndpoint(options)));
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ExecutableResourcePromise {
+        return new ExecutableResourcePromise(this._promise.then(obj => obj.withHttpsEndpoint(options)));
     }
 
     /** Makes HTTP endpoints externally accessible */
@@ -2935,6 +3080,31 @@ export class ProjectResource extends ResourceBuilderBase<ProjectResourceHandle> 
     }
 
     /** @internal */
+    async _withHttpsEndpointInternal(port?: number, targetPort?: number, name?: string, env?: string, isProxied?: boolean): Promise<ProjectResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle };
+        if (port !== undefined) rpcArgs.port = port;
+        if (targetPort !== undefined) rpcArgs.targetPort = targetPort;
+        if (name !== undefined) rpcArgs.name = name;
+        if (env !== undefined) rpcArgs.env = env;
+        if (isProxied !== undefined) rpcArgs.isProxied = isProxied;
+        const result = await this._client.invokeCapability<ProjectResourceHandle>(
+            'Aspire.Hosting/withHttpsEndpoint',
+            rpcArgs
+        );
+        return new ProjectResource(result, this._client);
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ProjectResourcePromise {
+        const port = options?.port;
+        const targetPort = options?.targetPort;
+        const name = options?.name;
+        const env = options?.env;
+        const isProxied = options?.isProxied;
+        return new ProjectResourcePromise(this._withHttpsEndpointInternal(port, targetPort, name, env, isProxied));
+    }
+
+    /** @internal */
     async _withExternalHttpEndpointsInternal(): Promise<ProjectResource> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle };
         const result = await this._client.invokeCapability<ProjectResourceHandle>(
@@ -3347,6 +3517,11 @@ export class ProjectResourcePromise implements PromiseLike<ProjectResource> {
         return new ProjectResourcePromise(this._promise.then(obj => obj.withHttpEndpoint(options)));
     }
 
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ProjectResourcePromise {
+        return new ProjectResourcePromise(this._promise.then(obj => obj.withHttpsEndpoint(options)));
+    }
+
     /** Makes HTTP endpoints externally accessible */
     withExternalHttpEndpoints(): ProjectResourcePromise {
         return new ProjectResourcePromise(this._promise.then(obj => obj.withExternalHttpEndpoints()));
@@ -3469,6 +3644,23 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     }
 
     /** @internal */
+    async _withVolumeInternal(name: string, target: string, isReadOnly?: boolean): Promise<TestRedisResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle, name, target };
+        if (isReadOnly !== undefined) rpcArgs.isReadOnly = isReadOnly;
+        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
+            'Aspire.Hosting/withVolume',
+            rpcArgs
+        );
+        return new TestRedisResource(result, this._client);
+    }
+
+    /** Adds a volume */
+    withVolume(name: string, target: string, options?: WithVolumeOptions): TestRedisResourcePromise {
+        const isReadOnly = options?.isReadOnly;
+        return new TestRedisResourcePromise(this._withVolumeInternal(name, target, isReadOnly));
+    }
+
+    /** @internal */
     async _withBindMountInternal(source: string, target: string, isReadOnly?: boolean): Promise<TestRedisResource> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle, source, target };
         if (isReadOnly !== undefined) rpcArgs.isReadOnly = isReadOnly;
@@ -3483,6 +3675,21 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     withBindMount(source: string, target: string, options?: WithBindMountOptions): TestRedisResourcePromise {
         const isReadOnly = options?.isReadOnly;
         return new TestRedisResourcePromise(this._withBindMountInternal(source, target, isReadOnly));
+    }
+
+    /** @internal */
+    async _withEntrypointInternal(entrypoint: string): Promise<TestRedisResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle, entrypoint };
+        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
+            'Aspire.Hosting/withEntrypoint',
+            rpcArgs
+        );
+        return new TestRedisResource(result, this._client);
+    }
+
+    /** Sets the container entrypoint */
+    withEntrypoint(entrypoint: string): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._withEntrypointInternal(entrypoint));
     }
 
     /** @internal */
@@ -3516,6 +3723,21 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     }
 
     /** @internal */
+    async _withContainerRuntimeArgsInternal(args: string[]): Promise<TestRedisResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle, args };
+        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
+            'Aspire.Hosting/withContainerRuntimeArgs',
+            rpcArgs
+        );
+        return new TestRedisResource(result, this._client);
+    }
+
+    /** Adds runtime arguments for the container */
+    withContainerRuntimeArgs(args: string[]): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._withContainerRuntimeArgsInternal(args));
+    }
+
+    /** @internal */
     async _withLifetimeInternal(lifetime: ContainerLifetime): Promise<TestRedisResource> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle, lifetime };
         const result = await this._client.invokeCapability<TestRedisResourceHandle>(
@@ -3528,6 +3750,21 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     /** Sets the lifetime behavior of the container resource */
     withLifetime(lifetime: ContainerLifetime): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._withLifetimeInternal(lifetime));
+    }
+
+    /** @internal */
+    async _withContainerNameInternal(name: string): Promise<TestRedisResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle, name };
+        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
+            'Aspire.Hosting/withContainerName',
+            rpcArgs
+        );
+        return new TestRedisResource(result, this._client);
+    }
+
+    /** Sets the container name */
+    withContainerName(name: string): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._withContainerNameInternal(name));
     }
 
     /** @internal */
@@ -3675,6 +3912,31 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     }
 
     /** @internal */
+    async _withHttpsEndpointInternal(port?: number, targetPort?: number, name?: string, env?: string, isProxied?: boolean): Promise<TestRedisResource> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle };
+        if (port !== undefined) rpcArgs.port = port;
+        if (targetPort !== undefined) rpcArgs.targetPort = targetPort;
+        if (name !== undefined) rpcArgs.name = name;
+        if (env !== undefined) rpcArgs.env = env;
+        if (isProxied !== undefined) rpcArgs.isProxied = isProxied;
+        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
+            'Aspire.Hosting/withHttpsEndpoint',
+            rpcArgs
+        );
+        return new TestRedisResource(result, this._client);
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): TestRedisResourcePromise {
+        const port = options?.port;
+        const targetPort = options?.targetPort;
+        const name = options?.name;
+        const env = options?.env;
+        const isProxied = options?.isProxied;
+        return new TestRedisResourcePromise(this._withHttpsEndpointInternal(port, targetPort, name, env, isProxied));
+    }
+
+    /** @internal */
     async _withExternalHttpEndpointsInternal(): Promise<TestRedisResource> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle };
         const result = await this._client.invokeCapability<TestRedisResourceHandle>(
@@ -3764,25 +4026,6 @@ export class TestRedisResource extends ResourceBuilderBase<TestRedisResourceHand
     /** Sets the parent relationship */
     withParentRelationship(parent: ResourceBuilderBase): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._withParentRelationshipInternal(parent));
-    }
-
-    /** @internal */
-    async _withVolumeInternal(target: string, name?: string, isReadOnly?: boolean): Promise<TestRedisResource> {
-        const rpcArgs: Record<string, unknown> = { resource: this._handle, target };
-        if (name !== undefined) rpcArgs.name = name;
-        if (isReadOnly !== undefined) rpcArgs.isReadOnly = isReadOnly;
-        const result = await this._client.invokeCapability<TestRedisResourceHandle>(
-            'Aspire.Hosting/withVolume',
-            rpcArgs
-        );
-        return new TestRedisResource(result, this._client);
-    }
-
-    /** Adds a volume */
-    withVolume(target: string, options?: WithVolumeOptions): TestRedisResourcePromise {
-        const name = options?.name;
-        const isReadOnly = options?.isReadOnly;
-        return new TestRedisResourcePromise(this._withVolumeInternal(target, name, isReadOnly));
     }
 
     /** Gets the resource name */
@@ -4174,9 +4417,19 @@ export class TestRedisResourcePromise implements PromiseLike<TestRedisResource> 
         return this._promise.then(onfulfilled, onrejected);
     }
 
+    /** Adds a volume */
+    withVolume(name: string, target: string, options?: WithVolumeOptions): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._promise.then(obj => obj.withVolume(name, target, options)));
+    }
+
     /** Adds a bind mount */
     withBindMount(source: string, target: string, options?: WithBindMountOptions): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withBindMount(source, target, options)));
+    }
+
+    /** Sets the container entrypoint */
+    withEntrypoint(entrypoint: string): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._promise.then(obj => obj.withEntrypoint(entrypoint)));
     }
 
     /** Sets the container image tag */
@@ -4189,9 +4442,19 @@ export class TestRedisResourcePromise implements PromiseLike<TestRedisResource> 
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withImageRegistry(registry)));
     }
 
+    /** Adds runtime arguments for the container */
+    withContainerRuntimeArgs(args: string[]): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._promise.then(obj => obj.withContainerRuntimeArgs(args)));
+    }
+
     /** Sets the lifetime behavior of the container resource */
     withLifetime(lifetime: ContainerLifetime): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withLifetime(lifetime)));
+    }
+
+    /** Sets the container name */
+    withContainerName(name: string): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._promise.then(obj => obj.withContainerName(name)));
     }
 
     /** Sets an environment variable */
@@ -4234,6 +4497,11 @@ export class TestRedisResourcePromise implements PromiseLike<TestRedisResource> 
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withHttpEndpoint(options)));
     }
 
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): TestRedisResourcePromise {
+        return new TestRedisResourcePromise(this._promise.then(obj => obj.withHttpsEndpoint(options)));
+    }
+
     /** Makes HTTP endpoints externally accessible */
     withExternalHttpEndpoints(): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withExternalHttpEndpoints()));
@@ -4262,11 +4530,6 @@ export class TestRedisResourcePromise implements PromiseLike<TestRedisResource> 
     /** Sets the parent relationship */
     withParentRelationship(parent: ResourceBuilderBase): TestRedisResourcePromise {
         return new TestRedisResourcePromise(this._promise.then(obj => obj.withParentRelationship(parent)));
-    }
-
-    /** Adds a volume */
-    withVolume(target: string, options?: WithVolumeOptions): TestRedisResourcePromise {
-        return new TestRedisResourcePromise(this._promise.then(obj => obj.withVolume(target, options)));
     }
 
     /** Gets the resource name */
@@ -4889,6 +5152,31 @@ export class ResourceWithEndpoints extends ResourceBuilderBase<IResourceWithEndp
     }
 
     /** @internal */
+    async _withHttpsEndpointInternal(port?: number, targetPort?: number, name?: string, env?: string, isProxied?: boolean): Promise<ResourceWithEndpoints> {
+        const rpcArgs: Record<string, unknown> = { builder: this._handle };
+        if (port !== undefined) rpcArgs.port = port;
+        if (targetPort !== undefined) rpcArgs.targetPort = targetPort;
+        if (name !== undefined) rpcArgs.name = name;
+        if (env !== undefined) rpcArgs.env = env;
+        if (isProxied !== undefined) rpcArgs.isProxied = isProxied;
+        const result = await this._client.invokeCapability<IResourceWithEndpointsHandle>(
+            'Aspire.Hosting/withHttpsEndpoint',
+            rpcArgs
+        );
+        return new ResourceWithEndpoints(result, this._client);
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ResourceWithEndpointsPromise {
+        const port = options?.port;
+        const targetPort = options?.targetPort;
+        const name = options?.name;
+        const env = options?.env;
+        const isProxied = options?.isProxied;
+        return new ResourceWithEndpointsPromise(this._withHttpsEndpointInternal(port, targetPort, name, env, isProxied));
+    }
+
+    /** @internal */
     async _withExternalHttpEndpointsInternal(): Promise<ResourceWithEndpoints> {
         const rpcArgs: Record<string, unknown> = { builder: this._handle };
         const result = await this._client.invokeCapability<IResourceWithEndpointsHandle>(
@@ -4953,6 +5241,11 @@ export class ResourceWithEndpointsPromise implements PromiseLike<ResourceWithEnd
     /** Adds an HTTP endpoint */
     withHttpEndpoint(options?: WithHttpEndpointOptions): ResourceWithEndpointsPromise {
         return new ResourceWithEndpointsPromise(this._promise.then(obj => obj.withHttpEndpoint(options)));
+    }
+
+    /** Adds an HTTPS endpoint */
+    withHttpsEndpoint(options?: WithHttpsEndpointOptions): ResourceWithEndpointsPromise {
+        return new ResourceWithEndpointsPromise(this._promise.then(obj => obj.withHttpsEndpoint(options)));
     }
 
     /** Makes HTTP endpoints externally accessible */
@@ -5384,6 +5677,7 @@ process.on('uncaughtException', (error: Error) => {
 registerHandleWrapper('Aspire.Hosting/Aspire.Hosting.DistributedApplication', (handle, client) => new DistributedApplication(handle as DistributedApplicationHandle, client));
 registerHandleWrapper('Aspire.Hosting/Aspire.Hosting.DistributedApplicationExecutionContext', (handle, client) => new DistributedApplicationExecutionContext(handle as DistributedApplicationExecutionContextHandle, client));
 registerHandleWrapper('Aspire.Hosting/Aspire.Hosting.ApplicationModel.EndpointReference', (handle, client) => new EndpointReference(handle as EndpointReferenceHandle, client));
+registerHandleWrapper('Aspire.Hosting/Aspire.Hosting.ApplicationModel.EndpointReferenceExpression', (handle, client) => new EndpointReferenceExpression(handle as EndpointReferenceExpressionHandle, client));
 registerHandleWrapper('Aspire.Hosting/Aspire.Hosting.ApplicationModel.EnvironmentCallbackContext', (handle, client) => new EnvironmentCallbackContext(handle as EnvironmentCallbackContextHandle, client));
 registerHandleWrapper('Aspire.Hosting.CodeGeneration.TypeScript.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCallbackContext', (handle, client) => new TestCallbackContext(handle as TestCallbackContextHandle, client));
 registerHandleWrapper('Aspire.Hosting.CodeGeneration.TypeScript.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestEnvironmentContext', (handle, client) => new TestEnvironmentContext(handle as TestEnvironmentContextHandle, client));
