@@ -17,6 +17,7 @@ namespace Aspire.Hosting
 
     public static partial class DockerComposeEnvironmentExtensions
     {
+        [AspireExport("addDockerComposeEnvironment", Description = "Adds a Docker Compose publishing environment")]
         public static ApplicationModel.IResourceBuilder<Docker.DockerComposeEnvironmentResource> AddDockerComposeEnvironment(this IDistributedApplicationBuilder builder, string name) { throw null; }
 
         public static ApplicationModel.IResourceBuilder<Docker.DockerComposeEnvironmentResource> ConfigureComposeFile(this ApplicationModel.IResourceBuilder<Docker.DockerComposeEnvironmentResource> builder, System.Action<Docker.Resources.ComposeFile> configure) { throw null; }
