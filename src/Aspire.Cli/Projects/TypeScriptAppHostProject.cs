@@ -321,9 +321,11 @@ internal sealed class TypeScriptAppHostProject : IAppHostProject
         try
         {
             // Step 1: Ensure certificates are trusted
+            Dictionary<string, string> certEnvVars;
             try
             {
-                await _certificateService.EnsureCertificatesTrustedAsync(_runner, cancellationToken);
+                var certResult = await _certificateService.EnsureCertificatesTrustedAsync(_runner, cancellationToken);
+                certEnvVars = new Dictionary<string, string>(certResult.EnvironmentVariables);
             }
             catch
             {
@@ -386,6 +388,12 @@ internal sealed class TypeScriptAppHostProject : IAppHostProject
 
             // Read launchSettings.json if it exists, or create defaults
             var launchSettingsEnvVars = ReadLaunchSettingsEnvironmentVariables(directory) ?? new Dictionary<string, string>();
+
+            // Apply certificate environment variables (e.g., SSL_CERT_DIR on Linux)
+            foreach (var kvp in certEnvVars)
+            {
+                launchSettingsEnvVars[kvp.Key] = kvp.Value;
+            }
 
             // Generate a backchannel socket path for CLI to connect to AppHost server
             var backchannelSocketPath = GetBackchannelSocketPath();
