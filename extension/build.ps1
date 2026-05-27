@@ -10,12 +10,6 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Check for npm
-if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-    Write-Error "Error: npm is not installed. Please install npm first."
-    exit 1
-}
-
 # Check for yarn
 if (-not (Get-Command yarn -ErrorAction SilentlyContinue)) {
     Write-Error "Error: yarn is not installed. Please install yarn first."
@@ -41,9 +35,13 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host "All prerequisites satisfied."
+
+# Ensure we run from the extension directory
+Set-Location $PSScriptRoot
+
 Write-Host ""
 Write-Host "Running yarn install..."
-yarn install
+yarn install --frozen-lockfile --non-interactive
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "yarn install failed with exit code $LASTEXITCODE"

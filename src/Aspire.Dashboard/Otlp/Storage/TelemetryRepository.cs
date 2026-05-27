@@ -24,8 +24,15 @@ using static OpenTelemetry.Proto.Trace.V1.Span.Types;
 
 namespace Aspire.Dashboard.Otlp.Storage;
 
-public sealed class TelemetryRepository : IDisposable
+public sealed partial class TelemetryRepository : IDisposable
 {
+    internal const int MaxResourceViewCount = 10_000;
+    internal const int MaxInstrumentCount = 10_000;
+    internal const int MaxScopeCount = 10_000;
+    internal const int MaxDimensionCount = 10_000;
+    internal const int MaxKnownAttributeValueCount = 10_000;
+    internal const int MaxKnownAttributeValuesPerKey = 10_000;
+
     private readonly PauseManager _pauseManager;
     private readonly IOutgoingPeerResolver[] _outgoingPeerResolvers;
     private readonly ILogger _logger;
@@ -38,18 +45,29 @@ public sealed class TelemetryRepository : IDisposable
     private readonly List<Subscription> _metricsSubscriptions = new();
     private readonly List<Subscription> _tracesSubscriptions = new();
 
+    // Push-based streaming watchers - lazily initialized
+    private readonly object _watchersLock = new();
+    private List<SpanWatcher>? _spanWatchers;
+    private List<LogWatcher>? _logWatchers;
+
     private readonly ConcurrentDictionary<ResourceKey, OtlpResource> _resources = new();
 
     private readonly ReaderWriterLockSlim _logsLock = new();
+    // Bounded by MaxScopeCount. Cleared when all logs are cleared.
     private readonly Dictionary<string, OtlpScope> _logScopes = new();
     private readonly CircularBuffer<OtlpLogEntry> _logs;
+    // Bounded by _resources count * MaxAttributeCount. Cleared per-resource or when all logs are cleared.
     private readonly HashSet<(OtlpResource Resource, string PropertyKey)> _logPropertyKeys = new();
+    // Bounded by _resources count * MaxAttributeCount. Cleared per-resource or when all traces are cleared.
     private readonly HashSet<(OtlpResource Resource, string PropertyKey)> _tracePropertyKeys = new();
     private readonly Dictionary<ResourceKey, int> _resourceUnviewedErrorLogs = new();
 
     private readonly ReaderWriterLockSlim _tracesLock = new();
+    // Bounded by MaxScopeCount. Cleared when all traces are cleared.
     private readonly Dictionary<string, OtlpScope> _traceScopes = new();
     private readonly CircularBuffer<OtlpTrace> _traces;
+    // Not explicitly capped per add — bounded only by the sum of span links across in-buffer traces.
+    // Cleaned up on trace eviction and clear, so growth is limited by the circular buffer capacity.
     private readonly List<OtlpSpanLink> _spanLinks = new();
     private readonly List<IDisposable> _peerResolverSubscriptions = new();
     internal readonly OtlpContext _otlpContext;
@@ -232,6 +250,14 @@ public sealed class TelemetryRepository : IDisposable
             return (Resource: resource, IsNew: false);
         }
 
+        // Check resource limit before adding a new resource.
+        // Note: This is a soft cap. Concurrent callers may both pass this check and slightly exceed the limit
+        // because _resources is a ConcurrentDictionary and the count check + GetOrAdd are not atomic.
+        if (_resources.Count >= _otlpContext.Options.MaxResourceCount)
+        {
+            throw new InvalidOperationException($"Resource limit of {_otlpContext.Options.MaxResourceCount} reached. Resource '{key}' will not be added.");
+        }
+
         // Slower get or add path.
         // This GetOrAdd allocates a closure, so we avoid it if possible.
         var newResource = false;
@@ -318,7 +344,7 @@ public sealed class TelemetryRepository : IDisposable
             }
             catch (Exception ex)
             {
-                context.FailureCount += rl.ScopeLogs.Count;
+                context.FailureCount += rl.ScopeLogs.Sum(s => s.LogRecords.Count);
                 _otlpContext.Logger.LogInformation(ex, "Error adding resource.");
                 continue;
             }
@@ -332,6 +358,8 @@ public sealed class TelemetryRepository : IDisposable
 
     public void AddLogsCore(AddContext context, OtlpResourceView resourceView, RepeatedField<ScopeLogs> scopeLogs)
     {
+        List<OtlpLogEntry>? addedLogs = null;
+
         _logsLock.EnterWriteLock();
 
         try
@@ -384,6 +412,11 @@ public sealed class TelemetryRepository : IDisposable
                         {
                             _logPropertyKeys.Add((resourceView.Resource, kvp.Key));
                         }
+
+                        // Collect log for push-based streaming (lazy init to avoid allocation when no watchers)
+                        addedLogs ??= new List<OtlpLogEntry>();
+                        addedLogs.Add(logEntry);
+
                         context.SuccessCount++;
                     }
                     catch (Exception ex)
@@ -397,6 +430,12 @@ public sealed class TelemetryRepository : IDisposable
         finally
         {
             _logsLock.ExitWriteLock();
+        }
+
+        // Push logs to watchers outside the lock
+        if (addedLogs is not null)
+        {
+            PushLogsToWatchers(addedLogs, resourceView.ResourceKey);
         }
     }
 
@@ -590,53 +629,58 @@ public sealed class TelemetryRepository : IDisposable
 
         try
         {
-            var results = _traces.AsEnumerable();
-            if (resources?.Count > 0)
-            {
-                results = results.Where(t =>
-                {
-                    return MatchResources(t, resources);
-                });
-            }
-            if (!string.IsNullOrWhiteSpace(context.FilterText))
-            {
-                results = results.Where(t => t.FullName.Contains(context.FilterText, StringComparison.OrdinalIgnoreCase));
-            }
-
             var filters = context.Filters.GetEnabledFilters().ToList();
+            var optimizedFilters = CreateOptimizedTraceFilters(filters);
+            var resourceFilter = resources is { Count: > 0 } ? resources : null;
+            var hasTelemetryFilters = filters.Count > 0;
+            var hasFilterText = !string.IsNullOrWhiteSpace(context.FilterText);
+            var startIndex = Math.Max(context.StartIndex, 0);
+            var count = Math.Max(context.Count, 0);
+            List<OtlpTrace>? items = null;
+            var totalItemCount = 0;
+            var maxDuration = default(TimeSpan);
 
-            if (filters.Count > 0)
+            foreach (var trace in _traces)
             {
-                results = results.Where(t =>
+                if (resourceFilter is not null && !MatchResources(trace, resourceFilter))
                 {
-                    // A trace matches when one of its span matches all filters.
-                    foreach (var span in t.Spans)
-                    {
-                        var match = true;
-                        foreach (var filter in filters)
-                        {
-                            if (!filter.Apply(span))
-                            {
-                                match = false;
-                                break;
-                            }
-                        }
+                    continue;
+                }
 
-                        if (match)
-                        {
-                            return true;
-                        }
-                    }
+                if (hasFilterText && !trace.FullName.Contains(context.FilterText, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-                    return false;
-                });
+                if (hasTelemetryFilters && !MatchesFilters(trace, filters, optimizedFilters))
+                {
+                    continue;
+                }
+
+                totalItemCount++;
+
+                var duration = trace.Duration;
+                if (duration > maxDuration)
+                {
+                    maxDuration = duration;
+                }
+
+                // Keep paging, total count, and MaxDuration in the same scan. The dashboard
+                // needs MaxDuration for the full filtered set, while only the requested page
+                // should pay the clone cost needed to isolate callers from live span updates.
+                if (totalItemCount > startIndex && (items?.Count ?? 0) < count)
+                {
+                    items ??= new List<OtlpTrace>(Math.Min(count, _traces.Count));
+                    items.Add(OtlpTrace.Clone(trace));
+                }
             }
 
-            // Traces can be modified as new spans are added. Copy traces before returning results to avoid concurrency issues.
-            var copyFunc = static (OtlpTrace t) => OtlpTrace.Clone(t);
-
-            var pagedResults = OtlpHelpers.GetItems(results, context.StartIndex, context.Count, _traces.IsFull, copyFunc);
-            var maxDuration = pagedResults.TotalItemCount > 0 ? results.Max(r => r.Duration) : default;
+            var pagedResults = new PagedResult<OtlpTrace>
+            {
+                Items = items ?? new List<OtlpTrace>(),
+                TotalItemCount = totalItemCount,
+                IsFull = _traces.IsFull
+            };
 
             return new GetTracesResponse
             {
@@ -647,6 +691,269 @@ public sealed class TelemetryRepository : IDisposable
         finally
         {
             _tracesLock.ExitReadLock();
+        }
+    }
+
+    private static List<TraceFilter>? CreateOptimizedTraceFilters(List<TelemetryFilter> filters)
+    {
+        List<TraceFilter>? result = null;
+        for (var i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
+            var traceFilter = TraceFilter.Create(filter);
+            if (traceFilter.IsOptimized)
+            {
+                result ??= new List<TraceFilter>(filters.Count);
+                for (var j = result.Count; j < i; j++)
+                {
+                    result.Add(new TraceFilter(filters[j], null, null));
+                }
+            }
+
+            result?.Add(traceFilter);
+        }
+
+        return result;
+    }
+
+    private static bool MatchesFilters(OtlpTrace trace, List<TelemetryFilter> filters, List<TraceFilter>? optimizedFilters)
+    {
+        if (optimizedFilters is not null)
+        {
+            return MatchesFilters(trace, optimizedFilters);
+        }
+
+        // Duration filters apply to the trace's overall duration, not individual spans.
+        foreach (var filter in filters)
+        {
+            if (filter.IsTraceDurationFilter() && !filter.HasNumericMatch(trace.Duration.TotalMilliseconds))
+            {
+                return false;
+            }
+        }
+
+        // A trace matches when one of its spans matches all non-duration filters.
+        foreach (var span in trace.Spans)
+        {
+            var match = true;
+            foreach (var filter in filters)
+            {
+                if (filter.IsTraceDurationFilter())
+                {
+                    continue;
+                }
+
+                if (!filter.Apply(span))
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool MatchesFilters(OtlpTrace trace, List<TraceFilter> optimizedFilters)
+    {
+        // Duration filters apply to the trace's overall duration, not individual spans.
+        foreach (var filter in optimizedFilters)
+        {
+            if (filter.IsDurationFilter && !filter.ApplyDuration(trace.Duration.TotalMilliseconds))
+            {
+                return false;
+            }
+        }
+
+        // A trace matches when one of its spans matches all non-duration filters.
+        foreach (var span in trace.Spans)
+        {
+            var match = true;
+            foreach (var filter in optimizedFilters)
+            {
+                if (filter.IsDurationFilter)
+                {
+                    continue;
+                }
+
+                if (!filter.Apply(span))
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private readonly record struct TraceFilter(TelemetryFilter Filter, DurationFilter? OptimizedDurationFilter, StringFilter? OptimizedStringFilter)
+    {
+        public bool IsOptimized => OptimizedDurationFilter is not null || OptimizedStringFilter is not null;
+
+        public bool IsDurationFilter => OptimizedDurationFilter is not null || Filter.IsTraceDurationFilter();
+
+        public static TraceFilter Create(TelemetryFilter filter)
+        {
+            if (DurationFilter.TryCreate(filter, out var durationFilter))
+            {
+                return new TraceFilter(filter, durationFilter, null);
+            }
+
+            if (StringFilter.TryCreate(filter, out var stringFilter))
+            {
+                return new TraceFilter(filter, null, stringFilter);
+            }
+
+            return new TraceFilter(filter, null, null);
+        }
+
+        public bool Apply(OtlpSpan span)
+        {
+            if (OptimizedStringFilter is { } stringFilter)
+            {
+                return stringFilter.Apply(span);
+            }
+
+            return Filter.Apply(span);
+        }
+
+        public bool ApplyDuration(double traceDurationMs)
+        {
+            if (OptimizedDurationFilter is { } durationFilter)
+            {
+                return durationFilter.Apply(traceDurationMs);
+            }
+
+            return Filter.HasNumericMatch(traceDurationMs);
+        }
+    }
+
+    private readonly record struct DurationFilter(FilterCondition Condition, double Value)
+    {
+        public static bool TryCreate(TelemetryFilter filter, out DurationFilter durationFilter)
+        {
+            if (filter is FieldTelemetryFilter { Field: KnownTraceFields.DurationField } fieldFilter &&
+                double.TryParse(fieldFilter.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
+                double.IsFinite(value) &&
+                IsSupportedCondition(fieldFilter.Condition))
+            {
+                durationFilter = new DurationFilter(fieldFilter.Condition, value);
+                return true;
+            }
+
+            durationFilter = default;
+            return false;
+        }
+
+        public bool Apply(double durationMilliseconds)
+        {
+            if (!double.IsFinite(durationMilliseconds))
+            {
+                return false;
+            }
+
+            // Avoid formatting the span duration and reparsing the filter threshold for each
+            // span. Duration is a known numeric field, so this preserves FieldTelemetryFilter's
+            // numeric comparison semantics without the per-span string allocation.
+            return Condition switch
+            {
+                FilterCondition.Equals => durationMilliseconds == Value,
+                FilterCondition.GreaterThan => durationMilliseconds > Value,
+                FilterCondition.LessThan => durationMilliseconds < Value,
+                FilterCondition.GreaterThanOrEqual => durationMilliseconds >= Value,
+                FilterCondition.LessThanOrEqual => durationMilliseconds <= Value,
+                FilterCondition.NotEqual => durationMilliseconds != Value,
+                _ => false
+            };
+        }
+
+        private static bool IsSupportedCondition(FilterCondition condition)
+        {
+            return condition is FilterCondition.Equals
+                or FilterCondition.GreaterThan
+                or FilterCondition.LessThan
+                or FilterCondition.GreaterThanOrEqual
+                or FilterCondition.LessThanOrEqual
+                or FilterCondition.NotEqual;
+        }
+    }
+
+    private readonly record struct StringFilter(string Field, FilterCondition Condition, string Value)
+    {
+        public static bool TryCreate(TelemetryFilter filter, out StringFilter stringFilter)
+        {
+            if (filter is FieldTelemetryFilter fieldFilter &&
+                !FieldTelemetryFilter.IsNumericField(fieldFilter.Field) &&
+                IsSupportedCondition(fieldFilter.Condition))
+            {
+                stringFilter = new StringFilter(fieldFilter.Field, fieldFilter.Condition, fieldFilter.Value);
+                return true;
+            }
+
+            stringFilter = default;
+            return false;
+        }
+
+        public bool Apply(OtlpSpan span)
+        {
+            var fieldValue = OtlpSpan.GetFieldValue(span, Field);
+            var isNot = Condition is FilterCondition.NotEqual or FilterCondition.NotContains;
+
+            if (!isNot)
+            {
+                if (fieldValue.Value1 is not null && IsMatch(fieldValue.Value1))
+                {
+                    return true;
+                }
+
+                if (fieldValue.Value2 is not null && IsMatch(fieldValue.Value2))
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                if (fieldValue.Value1 is not null && IsMatch(fieldValue.Value1))
+                {
+                    if (fieldValue.Value2 is null || IsMatch(fieldValue.Value2))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsMatch(string fieldValue)
+        {
+            return Condition switch
+            {
+                FilterCondition.Equals => string.Equals(fieldValue, Value, StringComparisons.OtlpFieldValue),
+                FilterCondition.Contains => fieldValue.Contains(Value, StringComparisons.OtlpFieldValue),
+                FilterCondition.NotEqual => !string.Equals(fieldValue, Value, StringComparisons.OtlpFieldValue),
+                FilterCondition.NotContains => !fieldValue.Contains(Value, StringComparisons.OtlpFieldValue),
+                _ => false
+            };
+        }
+
+        private static bool IsSupportedCondition(FilterCondition condition)
+        {
+            return condition is FilterCondition.Equals
+                or FilterCondition.Contains
+                or FilterCondition.NotEqual
+                or FilterCondition.NotContains;
         }
     }
 
@@ -774,22 +1081,41 @@ public sealed class TelemetryRepository : IDisposable
             {
                 // Nothing selected, clear everything.
                 _traces.Clear();
+                _traceScopes.Clear();
+                _tracePropertyKeys.Clear();
+                _spanLinks.Clear();
+
+                foreach (var resource in _resources.Values)
+                {
+                    SetResourceHasTraces(resource, false);
+                }
             }
             else
             {
                 for (var i = _traces.Count - 1; i >= 0; i--)
                 {
+                    var trace = _traces[i];
                     // Remove trace if any span matches one of the resources. This matches filter behavior.
-                    if (MatchResources(_traces[i], resources))
+                    if (MatchResources(trace, resources))
                     {
+                        // Remove span links for the removed trace.
+                        foreach (var span in trace.Spans)
+                        {
+                            foreach (var link in span.Links)
+                            {
+                                _spanLinks.Remove(link);
+                            }
+                        }
+
                         _traces.RemoveAt(i);
                         continue;
                     }
                 }
 
-                // Update HasTraces flag for cleared resources
+                // Remove property keys for cleared resources.
                 foreach (var resource in resources)
                 {
+                    _tracePropertyKeys.RemoveWhere(k => k.Resource.ResourceKey == resource.ResourceKey);
                     SetResourceHasTraces(resource, false);
                 }
             }
@@ -818,6 +1144,15 @@ public sealed class TelemetryRepository : IDisposable
             {
                 // Nothing selected, clear everything.
                 _logs.Clear();
+                _logScopes.Clear();
+                _logPropertyKeys.Clear();
+
+                foreach (var resource in _resources.Values)
+                {
+                    SetResourceHasLogs(resource, false);
+                }
+
+                _resourceUnviewedErrorLogs.Clear();
             }
             else
             {
@@ -830,9 +1165,10 @@ public sealed class TelemetryRepository : IDisposable
                     }
                 }
 
-                // Update HasLogs flag for cleared resources
+                // Update HasLogs flag and remove property keys for cleared resources.
                 foreach (var resource in resources)
                 {
+                    _logPropertyKeys.RemoveWhere(k => k.Resource.ResourceKey == resource.ResourceKey);
                     SetResourceHasLogs(resource, false);
                     _resourceUnviewedErrorLogs.Remove(resource.ResourceKey);
                 }
@@ -879,36 +1215,14 @@ public sealed class TelemetryRepository : IDisposable
     {
         _tracesLock.EnterReadLock();
 
-        var attributesValues = new Dictionary<string, int>(StringComparers.OtlpAttribute);
-
         try
         {
-            foreach (var trace in _traces)
-            {
-                foreach (var span in trace.Spans)
-                {
-                    var values = OtlpSpan.GetFieldValue(span, attributeName);
-                    if (values.Value1 != null)
-                    {
-                        ref var count = ref CollectionsMarshal.GetValueRefOrAddDefault(attributesValues, values.Value1, out _);
-                        // Adds to dictionary if not present.
-                        count++;
-                    }
-                    if (values.Value2 != null)
-                    {
-                        ref var count = ref CollectionsMarshal.GetValueRefOrAddDefault(attributesValues, values.Value2, out _);
-                        // Adds to dictionary if not present.
-                        count++;
-                    }
-                }
-            }
+            return OtlpSpan.GetFieldValuesFromTraces(_traces, attributeName);
         }
         finally
         {
             _tracesLock.ExitReadLock();
         }
-
-        return attributesValues;
     }
 
     public Dictionary<string, int> GetLogsFieldValues(string attributeName)
@@ -1048,7 +1362,7 @@ public sealed class TelemetryRepository : IDisposable
             }
             catch (Exception ex)
             {
-                context.FailureCount += rm.ScopeMetrics.Sum(s => s.Metrics.Count);
+                context.FailureCount += rm.ScopeMetrics.Sum(sm => sm.Metrics.Sum(OtlpResource.GetMetricDataPointCount));
                 _otlpContext.Logger.LogInformation(ex, "Error adding resource.");
                 continue;
             }
@@ -1118,6 +1432,8 @@ public sealed class TelemetryRepository : IDisposable
 
     internal void AddTracesCore(AddContext context, OtlpResourceView resourceView, RepeatedField<ScopeSpans> scopeSpans)
     {
+        List<OtlpSpan>? addedSpans = null;
+
         _tracesLock.EnterWriteLock();
 
         try
@@ -1235,6 +1551,11 @@ public sealed class TelemetryRepository : IDisposable
                         Debug.Assert(_traces.Contains(trace), "Trace not found in traces collection.");
 
                         updatedTraces[trace.Key] = trace;
+
+                        // Collect span for push-based streaming (lazy init to avoid allocation when no watchers)
+                        addedSpans ??= new List<OtlpSpan>();
+                        addedSpans.Add(newSpan);
+
                         context.SuccessCount++;
                     }
                     catch (Exception ex)
@@ -1258,6 +1579,12 @@ public sealed class TelemetryRepository : IDisposable
         finally
         {
             _tracesLock.ExitWriteLock();
+        }
+
+        // Push spans to watchers outside the lock
+        if (addedSpans is not null)
+        {
+            PushSpansToWatchers(addedSpans, resourceView.ResourceKey);
         }
 
         static bool TryGetTraceById(CircularBuffer<OtlpTrace> traces, ReadOnlyMemory<byte> traceId, [NotNullWhen(true)] out OtlpTrace? trace)
@@ -1285,9 +1612,17 @@ public sealed class TelemetryRepository : IDisposable
             return null;
         }
 
-        var resourceKey = ResourceKey.Create(name: peer.DisplayName, instanceId: peer.Name);
-        var (resource, _) = GetOrAddResource(resourceKey, uninstrumentedPeer: true);
-        return resource;
+        try
+        {
+            var resourceKey = ResourceKey.Create(name: peer.DisplayName, instanceId: peer.Name);
+            var (resource, _) = GetOrAddResource(resourceKey, uninstrumentedPeer: true);
+            return resource;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(ex, "Error adding peer resource.");
+            return null;
+        }
     }
 
     private void CalculateTraceUninstrumentedPeers(OtlpTrace trace)
@@ -1307,9 +1642,16 @@ public sealed class TelemetryRepository : IDisposable
                     continue;
                 }
 
-                var resourceKey = ResourceKey.Create(name: uninstrumentedPeer.DisplayName, instanceId: uninstrumentedPeer.Name);
-                var (resource, _) = GetOrAddResource(resourceKey, uninstrumentedPeer: true);
-                trace.SetSpanUninstrumentedPeer(span, resource);
+                try
+                {
+                    var resourceKey = ResourceKey.Create(name: uninstrumentedPeer.DisplayName, instanceId: uninstrumentedPeer.Name);
+                    var (resource, _) = GetOrAddResource(resourceKey, uninstrumentedPeer: true);
+                    trace.SetSpanUninstrumentedPeer(span, resource);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogInformation(ex, "Error adding uninstrumented peer resource.");
+                }
             }
             else
             {
@@ -1418,7 +1760,7 @@ public sealed class TelemetryRepository : IDisposable
             EndTime = OtlpHelpers.UnixNanoSecondsToDateTime(span.EndTimeUnixNano),
             Status = ConvertStatus(span.Status),
             StatusMessage = span.Status?.Message,
-            Attributes = span.Attributes.ToKeyValuePairs(context),
+            Attributes = span.Attributes.ToKeyValuePairs(context, filter: attribute => attribute.Key != OtlpHelpers.AspireDestinationNameAttribute),
             State = !string.IsNullOrEmpty(span.TraceState) ? span.TraceState : null,
             Events = events,
             Links = links,
@@ -1535,7 +1877,14 @@ public sealed class TelemetryRepository : IDisposable
             // When peers change then we need to recalculate the uninstrumented peers of spans.
             foreach (var trace in _traces)
             {
-                CalculateTraceUninstrumentedPeers(trace);
+                try
+                {
+                    CalculateTraceUninstrumentedPeers(trace);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogInformation(ex, "Error recalculating uninstrumented peers.");
+                }
             }
         }
         finally
@@ -1552,5 +1901,7 @@ public sealed class TelemetryRepository : IDisposable
         {
             subscription.Dispose();
         }
+
+        DisposeWatchers();
     }
 }

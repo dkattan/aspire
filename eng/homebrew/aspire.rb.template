@@ -1,0 +1,26 @@
+cask "aspire" do
+  arch arm: "arm64", intel: "x64"
+
+  version "${VERSION}"
+  sha256 arm:   "${SHA256_OSX_ARM64}",
+         intel: "${SHA256_OSX_X64}"
+
+  url "https://ci.dot.net/public/aspire/${ARTIFACT_VERSION}/aspire-cli-osx-#{arch}-#{version}.tar.gz",
+      verified: "ci.dot.net/public/aspire/"
+  name "Aspire CLI"
+  desc "CLI for building observable, production-ready distributed applications"
+  homepage "https://aspire.dev/"
+
+  livecheck do
+    skip "ci.dot.net artifact storage has no version index; Aspire release automation manages cask updates"
+  end
+
+  binary "aspire"
+
+  # Write the sidecar file
+  postflight do
+    File.write("#{staged_path}/.aspire-install.json", %Q({"source":"brew"}\n))
+  end
+
+  # No zap stanza required
+end

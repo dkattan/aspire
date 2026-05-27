@@ -3,9 +3,9 @@
 ## Install Prerequisites
 
 - Node.js (LTS version)
-- NPM and yarn accessible in the PATH
+- Yarn accessible in the PATH
 - Visual Studio Code (latest) or Visual Studio Code Insiders
-- .NET Aspire CLI must be installed and available in the PATH
+- [Aspire CLI](https://aspire.dev/get-started/install-cli/) must be installed and available in the PATH
 
 ## Build CLI
 
@@ -23,3 +23,15 @@ If you want to effectively debug the Aspire CLI together with the Aspire VS Code
 You may also want to use the `Run Extension (cli stop on entry)` launch configuration, as `Run Extension` does not prevent the Aspire CLI from executing immediately.
 
 You can use the `Aspire: Extension settings` command to open VS Code settings directly to the Aspire extension category.
+
+## Updating dependency overrides
+
+The extension is built with **yarn**, so `package.json` uses `resolutions` for transitive dependency pins and `yarn.lock` is the authoritative lockfile.
+
+When pinning a transitive dependency (e.g. to address a security advisory), add the pin to `resolutions` and regenerate `yarn.lock` in the same change:
+
+```bash
+yarn install
+```
+
+The build rejects public npm registry URLs in `yarn.lock`; ensure regenerated entries resolve through the internal `dotnet-public-npm` feed.

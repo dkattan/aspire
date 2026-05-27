@@ -61,6 +61,14 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        public static string DotNetSdkUnavailableAppHostDiscoveryWarning
+        {
+            get
+            {
+                return ResourceManager.GetString("DotNetSdkUnavailableAppHostDiscoveryWarning", resourceCulture);
+            }
+        }
+
         public static string InvalidLocaleProvided
         {
             get
@@ -101,11 +109,35 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        public static string CertificateGenerationFailed
+        {
+            get
+            {
+                return ResourceManager.GetString("CertificateGenerationFailed", resourceCulture);
+            }
+        }
+
         public static string CertificatesMayNotBeFullyTrusted
         {
             get
             {
                 return ResourceManager.GetString("CertificatesMayNotBeFullyTrusted", resourceCulture);
+            }
+        }
+
+        public static string CertificatesNotTrustedNonInteractive
+        {
+            get
+            {
+                return ResourceManager.GetString("CertificatesNotTrustedNonInteractive", resourceCulture);
+            }
+        }
+
+        public static string CertificatesPartiallyTrustedNonInteractive
+        {
+            get
+            {
+                return ResourceManager.GetString("CertificatesPartiallyTrustedNonInteractive", resourceCulture);
             }
         }
 
@@ -130,6 +162,14 @@ namespace Aspire.Cli.Resources {
             get
             {
                 return ResourceManager.GetString("FailedToSearchForPackages", resourceCulture);
+            }
+        }
+
+        public static string FailedToParsePackageSearchResults
+        {
+            get
+            {
+                return ResourceManager.GetString("FailedToParsePackageSearchResults", resourceCulture);
             }
         }
 
@@ -253,6 +293,30 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        public static string GlobalAppHostPathCannotBeSetWithConfigCommand
+        {
+            get
+            {
+                return ResourceManager.GetString("GlobalAppHostPathCannotBeSetWithConfigCommand", resourceCulture);
+            }
+        }
+
+        public static string LegacyAppHostPathCannotBeSetWithConfigCommand
+        {
+            get
+            {
+                return ResourceManager.GetString("LegacyAppHostPathCannotBeSetWithConfigCommand", resourceCulture);
+            }
+        }
+
+        public static string GlobalAppHostPathIgnored
+        {
+            get
+            {
+                return ResourceManager.GetString("GlobalAppHostPathIgnored", resourceCulture);
+            }
+        }
+
         public static string ConfigurationKeyNotFound
         {
             get
@@ -308,6 +372,13 @@ namespace Aspire.Cli.Resources {
                 return ResourceManager.GetString("ProjectFileMayBeUnbuildableAppHost", resourceCulture);
             }
         }
+        public static string ProjectFilesCreatedButNodeToolsNotFound
+        {
+            get
+            {
+                return ResourceManager.GetString("ProjectFilesCreatedButNodeToolsNotFound", resourceCulture);
+            }
+        }
         public static string AppHostsMayNotBeBuildable
         {
             get
@@ -327,6 +398,22 @@ namespace Aspire.Cli.Resources {
             get
             {
                 return ResourceManager.GetString("CommandNotSupportedWithSingleFileAppHost", resourceCulture);
+            }
+        }
+        public static string ProjectFileUnsupportedInCurrentEnvironment
+        {
+            get
+            {
+                return ResourceManager.GetString("ProjectFileUnsupportedInCurrentEnvironment", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   Looks up a localized string similar to The configuration file '{0}' contains invalid JSON: {1}.
+        /// </summary>
+        public static string InvalidJsonInConfigFile {
+            get {
+                return ResourceManager.GetString("InvalidJsonInConfigFile", resourceCulture);
             }
         }
     }

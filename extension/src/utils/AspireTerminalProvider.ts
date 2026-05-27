@@ -5,15 +5,52 @@ import { RpcServerConnectionInfo } from '../server/AspireRpcServer';
 import { DcpServerConnectionInfo } from '../dcp/types';
 import { getRunSessionInfo, getSupportedCapabilities } from '../capabilities';
 import { EnvironmentVariables } from './environment';
+import { resolveCliPath } from './cliPath';
 import path from 'path';
 
 export const enum AnsiColors {
-    Green = '\x1b[32m'
+    Green = '\x1b[32m',
+    Yellow = '\x1b[33m',
+    Blue = '\x1b[34m',
 }
 
 export interface AspireTerminal {
     terminal: vscode.Terminal;
     dispose: () => void;
+}
+
+export interface SendAspireCommandOptions {
+    redactAdditionalArgs?: boolean;
+}
+
+/**
+ * Quotes a single argument for safe interpolation into a shell command line.
+ *
+ * Windows: The output targets PowerShell (powershell.exe / pwsh.exe), which is
+ * VS Code's default integrated terminal on Windows. The argument is wrapped in
+ * double quotes and the interpolation-significant characters (backtick, double
+ * quote, dollar sign) are backtick-escaped. This form is NOT safe for cmd.exe;
+ * users who have configured cmd.exe as their default terminal may see
+ * unexpected behavior. End-to-end coverage through a real child process is
+ * out of scope for this helper.
+ *
+ * Unix: The output uses POSIX single-quote quoting, which is interpreted the
+ * same way by bash, zsh, dash, sh, and fish. Embedded single quotes are split
+ * out and rejoined with a double-quoted single quote.
+ *
+ * @param arg The raw argument value to quote.
+ * @param platform Override for the target platform. Defaults to
+ * `process.platform`, but tests pass an explicit value to validate both
+ * branches regardless of the host OS.
+ */
+export function quoteShellArg(arg: string, platform: NodeJS.Platform = process.platform): string {
+    if (platform === 'win32') {
+        // Order matters: escape backticks first so that the backticks we
+        // introduce when escaping " and $ are not themselves re-escaped.
+        return `"${arg.replace(/`/g, '``').replace(/"/g, '`"').replace(/\$/g, '`$')}"`;
+    }
+
+    return `'${arg.replace(/'/g, "'\"'\"'")}'`;
 }
 
 export class AspireTerminalProvider implements vscode.Disposable {
@@ -56,8 +93,8 @@ export class AspireTerminalProvider implements vscode.Disposable {
         this._dcpServerConnectionInfo = value;
     }
 
-    sendAspireCommandToAspireTerminal(subcommand: string, showTerminal: boolean = true) {
-        const cliPath = this.getAspireCliExecutablePath();
+    async sendAspireCommandToAspireTerminal(subcommand: string, showTerminal: boolean = true, additionalArgs?: string[], options?: SendAspireCommandOptions) {
+        const cliPath = await this.getAspireCliExecutablePath();
 
         // On Windows, use & to execute paths, especially those with special characters
         // On Unix, just use the path directly
@@ -70,21 +107,49 @@ export class AspireTerminalProvider implements vscode.Disposable {
             const quotedPath = /[\s"'`$!*?()&|<>;]/.test(cliPath) ? `'${cliPath.replace(/'/g, `'\"'\"'`)}'` : cliPath;
             command = `${quotedPath} ${subcommand}`;
         }
+        const baseCommand = command;
 
+        const extensionArgs: string[] = [];
         if (this.isCliDebugLoggingEnabled()) {
-            command += ' --debug';
+            extensionArgs.push('--debug');
         }
 
         if (process.env[EnvironmentVariables.ASPIRE_CLI_STOP_ON_ENTRY] === 'true') {
-            command += ' --cli-wait-for-debugger';
+            extensionArgs.push('--cli-wait-for-debugger');
+        }
+
+        const cliArgs = additionalArgs && additionalArgs.length > 0
+            ? [...extensionArgs, ...additionalArgs]
+            : extensionArgs;
+
+        if (cliArgs.length > 0) {
+            const quotedArgs = cliArgs.map(arg => quoteShellArg(arg));
+            command += ' ' + quotedArgs.join(' ');
         }
 
         const aspireTerminal = this.getAspireTerminal();
-        extensionLogOutputChannel.info(`Sending command to Aspire terminal: ${command}`);
-        aspireTerminal.terminal.sendText(command);
+        let logCommand = command;
+        if (options?.redactAdditionalArgs && additionalArgs && additionalArgs.length > 0) {
+            const logArgs = extensionArgs.map(arg => quoteShellArg(arg));
+            logArgs.push('[redacted command arguments]');
+            logCommand = `${baseCommand} ${logArgs.join(' ')}`;
+        }
+        extensionLogOutputChannel.info(`Sending command to Aspire terminal: ${logCommand}`);
+
         if (showTerminal) {
             aspireTerminal.terminal.show();
         }
+
+        if (aspireTerminal.terminal.shellIntegration) {
+            aspireTerminal.terminal.shellIntegration.executeCommand(command);
+        }
+        else {
+            // Without shell integration, VS Code can't tell whether the terminal is idle or
+            // a foreground process is running, so keep the previous safe interruption behavior.
+            aspireTerminal.terminal.sendText('\x03', false);
+            aspireTerminal.terminal.sendText(command);
+        }
+
     }
 
     getAspireTerminal(forceCreate?: boolean): AspireTerminal {
@@ -199,18 +264,16 @@ export class AspireTerminalProvider implements vscode.Disposable {
     }
 
 
-    getAspireCliExecutablePath(): string {
-        const aspireCliPath = vscode.workspace.getConfiguration('aspire').get<string>('aspireCliExecutablePath', '');
-        if (aspireCliPath && aspireCliPath.trim().length > 0) {
-            extensionLogOutputChannel.debug(`Using user-configured Aspire CLI path: ${aspireCliPath}`);
-            return aspireCliPath.trim();
-        }
-
-        extensionLogOutputChannel.debug('No user-configured Aspire CLI path found');
-        return "aspire";
+    async getAspireCliExecutablePath(): Promise<string> {
+        const result = await resolveCliPath();
+        return result.cliPath;
     }
 
     isCliDebugLoggingEnabled(): boolean {
         return vscode.workspace.getConfiguration('aspire').get<boolean>('enableAspireCliDebugLogging', false);
+    }
+
+    isDebugConfigEnvironmentLoggingEnabled(): boolean {
+        return vscode.workspace.getConfiguration('aspire').get<boolean>('enableDebugConfigEnvironmentLogging', false);
     }
 }

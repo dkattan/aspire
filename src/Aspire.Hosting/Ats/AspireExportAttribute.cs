@@ -16,8 +16,9 @@ namespace Aspire.Hosting;
 /// <item>
 /// <description>
 /// <b>Capability exports (on methods):</b> Marks a static method as an ATS capability.
-/// Specify just the method name - the capability ID is computed as <c>{AssemblyName}/{methodName}</c>.
-/// For example: <c>"addRedis"</c> in Aspire.Hosting.Redis becomes <c>Aspire.Hosting.Redis/addRedis</c>.
+/// The capability ID is automatically derived as <c>{AssemblyName}/{camelCaseMethodName}</c>.
+/// For example: <c>AddRedis</c> in Aspire.Hosting.Redis becomes <c>Aspire.Hosting.Redis/addRedis</c>.
+/// Specify an explicit <c>id</c> only when disambiguation is needed (e.g., multiple overloads).
 /// </description>
 /// </item>
 /// <item>
@@ -43,10 +44,15 @@ namespace Aspire.Hosting;
 /// </remarks>
 /// <example>
 /// <code>
-/// // Capability export on a method - just specify the method name
-/// [AspireExport("addRedis", Description = "Adds a Redis resource")]
+/// // Capability export on a method - capability ID is auto-derived as Aspire.Hosting.Redis/addRedis
+/// /// &lt;ats-summary&gt;Adds a Redis resource.&lt;/ats-summary&gt;
+/// [AspireExport]
 /// public static IResourceBuilder&lt;RedisResource&gt; AddRedis(...) { }
-/// // Scanner computes capability ID: Aspire.Hosting.Redis/addRedis
+///
+/// // Capability export with explicit ID for disambiguation (e.g., multiple overloads)
+/// /// &lt;ats-summary&gt;Adds a Redis resource with a specific port.&lt;/ats-summary&gt;
+/// [AspireExport("addRedisWithPort")]
+/// public static IResourceBuilder&lt;RedisResource&gt; AddRedis(..., int port) { }
 ///
 /// // Type export - type ID derived as {AssemblyName}/{TypeName}
 /// [AspireExport]
@@ -84,13 +90,13 @@ namespace Aspire.Hosting;
 public sealed class AspireExportAttribute : Attribute
 {
     /// <summary>
-    /// Initializes a new instance for a capability export (on methods).
+    /// Initializes a new instance for a capability export (on methods) with an explicit capability ID.
     /// </summary>
     /// <param name="id">
-    /// The method name for this capability. The full capability ID is computed
-    /// as <c>{AssemblyName}/{methodName}</c>.
-    /// For example: <c>"addRedis"</c> in Aspire.Hosting.Redis becomes
-    /// <c>Aspire.Hosting.Redis/addRedis</c>.
+    /// The capability name for this method. The full capability ID is computed
+    /// as <c>{AssemblyName}/{id}</c>.
+    /// Use this overload only when disambiguation is needed (e.g., multiple overloads of the same method).
+    /// When not specified, the capability ID is automatically derived from the method name using camelCase.
     /// </param>
     public AspireExportAttribute(string id)
     {
@@ -98,12 +104,13 @@ public sealed class AspireExportAttribute : Attribute
     }
 
     /// <summary>
-    /// Initializes a new instance for a type export.
+    /// Initializes a new instance for a type or method export.
     /// </summary>
     /// <remarks>
-    /// The type ID is automatically derived as <c>{AssemblyName}/{TypeName}</c>.
+    /// For type exports, the type ID is automatically derived as <c>{AssemblyName}/{TypeName}</c>.
     /// Set <see cref="ExposeProperties"/> to true for context types whose properties
     /// should be exposed as get/set capabilities.
+    /// For method exports, the capability ID is automatically derived from the method name using camelCase.
     /// </remarks>
     public AspireExportAttribute()
     {
@@ -150,8 +157,12 @@ public sealed class AspireExportAttribute : Attribute
     public Type? Type { get; set; }
 
     /// <summary>
-    /// Gets or sets a description of what this export does.
+    /// Gets or sets a compatibility description for this export.
     /// </summary>
+    /// <remarks>
+    /// XML documentation is the primary source for generated polyglot SDK API documentation.
+    /// Use <c>ats-summary</c> and related ATS XML documentation tags for new exports.
+    /// </remarks>
     public string? Description { get; set; }
 
     /// <summary>
@@ -206,4 +217,25 @@ public sealed class AspireExportAttribute : Attribute
     /// </para>
     /// </remarks>
     public bool ExposeMethods { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether synchronous exported methods should be invoked on a background thread by the ATS dispatcher.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Set this to <see langword="true"/> for synchronous exports that may invoke synchronous callback delegates which in turn
+    /// re-enter the remote host through ATS. Running the export on a background thread allows the JSON-RPC request loop to
+    /// continue processing nested callback and capability invocations while the synchronous method waits for the callback to
+    /// complete.
+    /// </para>
+    /// <para>
+    /// This setting only affects synchronous exported methods. Async exports that already return <see cref="Task"/> or
+    /// <see cref="Task{TResult}"/> are awaited normally and do not use this option.
+    /// </para>
+    /// <para>
+    /// When applied to a type, this setting also applies to exported members discovered from that type unless an individual
+    /// member overrides it.
+    /// </para>
+    /// </remarks>
+    public bool RunSyncOnBackgroundThread { get; set; }
 }

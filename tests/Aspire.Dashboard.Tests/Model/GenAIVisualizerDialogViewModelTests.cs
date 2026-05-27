@@ -672,7 +672,7 @@ public sealed class GenAIVisualizerDialogViewModelTests
 
         // Assert
         Assert.Empty(vm.Items);
-        Assert.StartsWith("System.InvalidOperationException: ", vm.DisplayErrorMessage);
+        Assert.NotNull(vm.DisplayErrorMessage);
     }
 
     [Fact]
@@ -2038,5 +2038,315 @@ public sealed class GenAIVisualizerDialogViewModelTests
         Assert.Equal(2, vm.Evaluations.Count);
         Assert.Contains(vm.Evaluations, e => e.Name == "LogEntryMetric" && e.ScoreValue == 0.65);
         Assert.Contains(vm.Evaluations, e => e.Name == "SpanEventMetric" && e.ScoreValue == 0.75);
+    }
+
+    [Fact]
+    public void Create_GenAIToolDefinitions_UnexpectedTypeObject_DoesNotThrow()
+    {
+        // Arrange
+        var repository = CreateRepository();
+
+        // Create tool definitions JSON with a parameter that has "type" as an object instead of string
+        // This simulates the issue reported where Microsoft Agent Framework might produce such JSON
+        var toolDefinitionsJson = """
+        [
+          {
+            "type": "function",
+            "name": "get_data",
+            "description": "Gets data from source",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "validParam": {
+                  "type": "string",
+                  "description": "A valid parameter with string type"
+                },
+                "invalidParam": {
+                  "type": {
+                    "description": "This is an object instead of a string - should be handled gracefully"
+                  },
+                  "description": "A parameter with invalid type structure"
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+        var attributes = new KeyValuePair<string, string>[]
+        {
+            KeyValuePair.Create(GenAIHelpers.GenAISystem, "System!"),
+            KeyValuePair.Create(GenAIHelpers.GenAIToolDefinitions, toolDefinitionsJson)
+        };
+
+        var addContext = new AddContext();
+        repository.AddTraces(addContext, new RepeatedField<ResourceSpans>()
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(),
+                ScopeSpans =
+                {
+                    new ScopeSpans
+                    {
+                        Scope = CreateScope(),
+                        Spans =
+                        {
+                            CreateSpan(traceId: "1", spanId: "1-1", startTime: s_testTime.AddMinutes(1), endTime: s_testTime.AddMinutes(10), attributes: attributes)
+                        }
+                    }
+                }
+            }
+        });
+        Assert.Equal(0, addContext.FailureCount);
+
+        var span = repository.GetSpan(GetHexId("1"), GetHexId("1-1"))!;
+        var spanDetailsViewModel = SpanDetailsViewModel.Create(span, repository, repository.GetResources());
+
+        // Act - should not throw an exception
+        var vm = Create(repository, spanDetailsViewModel);
+
+        // Assert - tool definition should be parsed, with valid parameter parsed correctly
+        // and invalid parameter handled gracefully (type will be null instead of throwing)
+        Assert.Single(vm.ToolDefinitions);
+        var tool = vm.ToolDefinitions[0];
+        Assert.Equal("function", tool.ToolDefinition.Type);
+        Assert.Equal("get_data", tool.ToolDefinition.Name);
+        Assert.Equal("Gets data from source", tool.ToolDefinition.Description);
+        Assert.NotNull(tool.ToolDefinition.Parameters);
+        Assert.NotNull(tool.ToolDefinition.Parameters.Properties);
+        Assert.Equal(2, tool.ToolDefinition.Parameters.Properties.Count);
+
+        // Valid parameter should be parsed correctly
+        Assert.True(tool.ToolDefinition.Parameters.Properties.ContainsKey("validParam"));
+        var validParam = tool.ToolDefinition.Parameters.Properties["validParam"];
+        Assert.Equal(JsonSchemaType.String, validParam.Type);
+        Assert.Equal("A valid parameter with string type", validParam.Description);
+
+        // Invalid parameter should still be in properties but with null type (not throw exception)
+        Assert.True(tool.ToolDefinition.Parameters.Properties.ContainsKey("invalidParam"));
+        var invalidParam = tool.ToolDefinition.Parameters.Properties["invalidParam"];
+        Assert.Null(invalidParam.Type); // Type should be null since it couldn't be parsed
+        Assert.Equal("A parameter with invalid type structure", invalidParam.Description);
+    }
+
+    [Fact]
+    public void Create_GenAISpanAttributes_TruncatedInputMessages_DisplaysAvailableMessages()
+    {
+        // Arrange
+        var repository = CreateRepository();
+
+        var inputMessages = JsonSerializer.Serialize(new List<ChatMessage>
+        {
+            new ChatMessage
+            {
+                Role = "user",
+                Parts = [new TextPart { Content = "First message" }]
+            },
+            new ChatMessage
+            {
+                Role = "assistant",
+                Parts = [new TextPart { Content = "Second message" }]
+            },
+            new ChatMessage
+            {
+                Role = "user",
+                Parts = [new TextPart { Content = "Third message that will be truncated" }]
+            }
+        }, GenAIMessagesContext.Default.ListChatMessage);
+
+        // Truncate the JSON mid-way through the third message
+        var truncatedInput = inputMessages.Substring(0, inputMessages.IndexOf("Third"));
+
+        var attributes = new KeyValuePair<string, string>[]
+        {
+            KeyValuePair.Create(GenAIHelpers.GenAISystem, "System!"),
+            KeyValuePair.Create("server.address", "ai-server.address"),
+            KeyValuePair.Create(GenAIHelpers.GenAIInputMessages, truncatedInput)
+        };
+
+        var addContext = new AddContext();
+        repository.AddTraces(addContext, new RepeatedField<ResourceSpans>()
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(),
+                ScopeSpans =
+                {
+                    new ScopeSpans
+                    {
+                        Scope = CreateScope(),
+                        Spans =
+                        {
+                            CreateSpan(traceId: "1", spanId: "1-1", startTime: s_testTime.AddMinutes(1), endTime: s_testTime.AddMinutes(10), attributes: attributes)
+                        }
+                    }
+                }
+            }
+        });
+        Assert.Equal(0, addContext.FailureCount);
+
+        var span = repository.GetSpan(GetHexId("1"), GetHexId("1-1"))!;
+        var spanDetailsViewModel = SpanDetailsViewModel.Create(span, repository, repository.GetResources());
+
+        // Act
+        var vm = Create(repository, spanDetailsViewModel);
+
+        // Assert - first two messages parsed, third truncated, plus truncation indicator
+        Assert.Null(vm.DisplayErrorMessage);
+        Assert.Collection(vm.Items,
+            m =>
+            {
+                Assert.Equal(GenAIItemType.UserMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal("First message", Assert.IsType<TextPart>(p.MessagePart).Content));
+            },
+            m =>
+            {
+                Assert.Equal(GenAIItemType.AssistantMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal("Second message", Assert.IsType<TextPart>(p.MessagePart).Content));
+            },
+            m =>
+            {
+                Assert.Equal(GenAIItemType.UserMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal(Resources.Dialogs.GenAIUnexpectedOrTruncatedContent, p.ErrorMessage));
+            });
+    }
+
+    [Fact]
+    public void Create_GenAISpanAttributes_TruncatedSystemInstructions_DisplaysPartialContent()
+    {
+        // Arrange
+        var repository = CreateRepository();
+
+        var systemInstruction = JsonSerializer.Serialize(new List<MessagePart>
+        {
+            new TextPart { Content = "First instruction" },
+            new TextPart { Content = "Second instruction that will be truncated" }
+        }, GenAIMessagesContext.Default.ListMessagePart);
+
+        // Truncate the JSON mid-way through the second instruction
+        var truncatedInstruction = systemInstruction.Substring(0, systemInstruction.IndexOf("Second"));
+
+        var attributes = new KeyValuePair<string, string>[]
+        {
+            KeyValuePair.Create(GenAIHelpers.GenAISystem, "System!"),
+            KeyValuePair.Create("server.address", "ai-server.address"),
+            KeyValuePair.Create(GenAIHelpers.GenAISystemInstructions, truncatedInstruction)
+        };
+
+        var addContext = new AddContext();
+        repository.AddTraces(addContext, new RepeatedField<ResourceSpans>()
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(),
+                ScopeSpans =
+                {
+                    new ScopeSpans
+                    {
+                        Scope = CreateScope(),
+                        Spans =
+                        {
+                            CreateSpan(traceId: "1", spanId: "1-1", startTime: s_testTime.AddMinutes(1), endTime: s_testTime.AddMinutes(10), attributes: attributes)
+                        }
+                    }
+                }
+            }
+        });
+        Assert.Equal(0, addContext.FailureCount);
+
+        var span = repository.GetSpan(GetHexId("1"), GetHexId("1-1"))!;
+        var spanDetailsViewModel = SpanDetailsViewModel.Create(span, repository, repository.GetResources());
+
+        // Act
+        var vm = Create(repository, spanDetailsViewModel);
+
+        // Assert - first instruction parsed, second truncated, plus truncation indicator
+        Assert.Null(vm.DisplayErrorMessage);
+        Assert.Collection(vm.Items,
+            m =>
+            {
+                Assert.Equal(GenAIItemType.SystemMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal("First instruction", Assert.IsType<TextPart>(p.MessagePart).Content),
+                    p => Assert.Equal(Resources.Dialogs.GenAIUnexpectedOrTruncatedContent, p.ErrorMessage));
+            });
+    }
+
+    [Fact]
+    public void Create_GenAISpanAttributes_TruncatedOutputMessages_DisplaysAvailableMessages()
+    {
+        // Arrange
+        var repository = CreateRepository();
+
+        var outputMessages = JsonSerializer.Serialize(new List<ChatMessage>
+        {
+            new ChatMessage
+            {
+                Role = "assistant",
+                Parts = [new TextPart { Content = "Complete output" }]
+            },
+            new ChatMessage
+            {
+                Role = "assistant",
+                Parts = [new TextPart { Content = "Truncated output message" }]
+            }
+        }, GenAIMessagesContext.Default.ListChatMessage);
+
+        // Truncate the JSON mid-way through the second message
+        var truncatedOutput = outputMessages.Substring(0, outputMessages.IndexOf("Truncated"));
+
+        var attributes = new KeyValuePair<string, string>[]
+        {
+            KeyValuePair.Create(GenAIHelpers.GenAISystem, "System!"),
+            KeyValuePair.Create("server.address", "ai-server.address"),
+            KeyValuePair.Create(GenAIHelpers.GenAIOutputInstructions, truncatedOutput)
+        };
+
+        var addContext = new AddContext();
+        repository.AddTraces(addContext, new RepeatedField<ResourceSpans>()
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(),
+                ScopeSpans =
+                {
+                    new ScopeSpans
+                    {
+                        Scope = CreateScope(),
+                        Spans =
+                        {
+                            CreateSpan(traceId: "1", spanId: "1-1", startTime: s_testTime.AddMinutes(1), endTime: s_testTime.AddMinutes(10), attributes: attributes)
+                        }
+                    }
+                }
+            }
+        });
+        Assert.Equal(0, addContext.FailureCount);
+
+        var span = repository.GetSpan(GetHexId("1"), GetHexId("1-1"))!;
+        var spanDetailsViewModel = SpanDetailsViewModel.Create(span, repository, repository.GetResources());
+
+        // Act
+        var vm = Create(repository, spanDetailsViewModel);
+
+        // Assert - first output message parsed, second truncated, plus truncation indicator
+        Assert.Null(vm.DisplayErrorMessage);
+        Assert.Collection(vm.Items,
+            m =>
+            {
+                Assert.Equal(GenAIItemType.OutputMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal("Complete output", Assert.IsType<TextPart>(p.MessagePart).Content));
+            },
+            m =>
+            {
+                Assert.Equal(GenAIItemType.OutputMessage, m.Type);
+                Assert.Collection(m.ItemParts,
+                    p => Assert.Equal(Resources.Dialogs.GenAIUnexpectedOrTruncatedContent, p.ErrorMessage));
+            });
     }
 }

@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire.Otlp.Serialization;
 using Google.Protobuf;
 using OpenTelemetry.Proto.Collector.Logs.V1;
 using OpenTelemetry.Proto.Collector.Metrics.V1;
@@ -565,7 +566,7 @@ internal static class OtlpJsonToProtobufConverter
         {
             foreach (var bc in json.BucketCounts)
             {
-                dataPoint.BucketCounts.Add(ulong.Parse(bc, System.Globalization.CultureInfo.InvariantCulture));
+                dataPoint.BucketCounts.Add(bc);
             }
         }
         if (json.ExplicitBounds is not null)
@@ -661,7 +662,7 @@ internal static class OtlpJsonToProtobufConverter
         {
             foreach (var bc in json.BucketCounts)
             {
-                buckets.BucketCounts.Add(ulong.Parse(bc, System.Globalization.CultureInfo.InvariantCulture));
+                buckets.BucketCounts.Add(bc);
             }
         }
         return buckets;

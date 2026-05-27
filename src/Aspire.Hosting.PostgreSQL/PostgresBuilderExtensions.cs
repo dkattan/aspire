@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREMCP001
+
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics.CodeAnalysis;
@@ -31,6 +33,7 @@ public static class PostgresBuilderExtensions
     /// <param name="password">The parameter used to provide the administrator password for the PostgreSQL resource. If <see langword="null"/> a random password will be generated.</param>
     /// <param name="port">The host port used when launching the container. If null a random port will be assigned.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
     /// <remarks>
     /// <para>
     /// This resource includes built-in health checks. When this resource is referenced as a dependency
@@ -40,7 +43,8 @@ public static class PostgresBuilderExtensions
     /// </para>
     /// This version of the package defaults to the <inheritdoc cref="PostgresContainerImageTags.Tag"/> tag of the <inheritdoc cref="PostgresContainerImageTags.Image"/> container image.
     /// </remarks>
-    [AspireExport("addPostgres", Description = "Adds a PostgreSQL server resource")]
+    /// <ats-remarks />
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> AddPostgres(this IDistributedApplicationBuilder builder,
         [ResourceName] string name,
         IResourceBuilder<ParameterResource>? userName = null,
@@ -126,6 +130,7 @@ public static class PostgresBuilderExtensions
     /// <param name="name">The name of the resource. This name will be used as the connection string name when referenced in a dependency.</param>
     /// <param name="databaseName">The name of the database. If not provided, this defaults to the same value as <paramref name="name"/>.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
     /// <remarks>
     /// <para>
     /// This resource includes built-in health checks. When this resource is referenced as a dependency
@@ -138,7 +143,8 @@ public static class PostgresBuilderExtensions
     /// The database creation happens automatically as part of the resource lifecycle.
     /// </para>
     /// </remarks>
-    [AspireExport("addDatabase", Description = "Adds a PostgreSQL database")]
+    /// <ats-remarks />
+    [AspireExport]
     public static IResourceBuilder<PostgresDatabaseResource> AddDatabase(this IResourceBuilder<PostgresServerResource> builder, [ResourceName] string name, string? databaseName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -181,6 +187,8 @@ public static class PostgresBuilderExtensions
     /// <param name="configureContainer">Callback to configure PgAdmin container resource.</param>
     /// <param name="containerName">The name of the container (Optional).</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport(RunSyncOnBackgroundThread = true)]
     public static IResourceBuilder<T> WithPgAdmin<T>(this IResourceBuilder<T> builder, Action<IResourceBuilder<PgAdminContainerResource>>? configureContainer = null, string? containerName = null)
         where T : PostgresServerResource
     {
@@ -235,6 +243,7 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder for PGAdmin.</param>
     /// <param name="port">The port to bind on the host. If <see langword="null"/> is used random port will be assigned.</param>
     /// <returns>The resource builder for PGAdmin.</returns>
+    [AspireExport("withPgAdminHostPort", MethodName = "withHostPort")]
     public static IResourceBuilder<PgAdminContainerResource> WithHostPort(this IResourceBuilder<PgAdminContainerResource> builder, int? port)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -251,6 +260,7 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder for pgweb.</param>
     /// <param name="port">The port to bind on the host. If <see langword="null"/> is used random port will be assigned.</param>
     /// <returns>The resource builder for pgweb.</returns>
+    [AspireExport("withPgWebHostPort", MethodName = "withHostPort")]
     public static IResourceBuilder<PgWebContainerResource> WithHostPort(this IResourceBuilder<PgWebContainerResource> builder, int? port)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -288,6 +298,8 @@ public static class PostgresBuilderExtensions
     /// </example>
     /// </remarks>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport(RunSyncOnBackgroundThread = true)]
     public static IResourceBuilder<PostgresServerResource> WithPgWeb(this IResourceBuilder<PostgresServerResource> builder, Action<IResourceBuilder<PgWebContainerResource>>? configureContainer = null, string? containerName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -355,6 +367,8 @@ public static class PostgresBuilderExtensions
     /// This version of the package defaults to the <inheritdoc cref="PostgresContainerImageTags.PostgresMcpTag"/> tag of the <inheritdoc cref="PostgresContainerImageTags.PostgresMcpImage"/> container image.
     /// </remarks>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport(RunSyncOnBackgroundThread = true)]
     [Experimental("ASPIREPOSTGRES001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     public static IResourceBuilder<PostgresDatabaseResource> WithPostgresMcp(
         this IResourceBuilder<PostgresDatabaseResource> builder,
@@ -365,7 +379,7 @@ public static class PostgresBuilderExtensions
 
         containerName ??= $"{builder.Resource.Name}-mcp";
 
-        if (builder.ApplicationBuilder.Resources.OfType<PostgresMcpContainerResource>().FirstOrDefault(r => string.Equals(r.Name, containerName, StringComparisons.ResourceName)) is { } existing)
+        if (builder.ApplicationBuilder.Resources.TryGetByName(containerName, out var existingResource) && existingResource is PostgresMcpContainerResource existing)
         {
             var existingBuilder = builder.ApplicationBuilder.CreateResourceBuilder(existing);
             configureContainer?.Invoke(existingBuilder);
@@ -383,7 +397,7 @@ public static class PostgresBuilderExtensions
             {
                 context.EnvironmentVariables[PostgresMcpDatabaseUriEnvVarName] = builder.Resource.UriExpression;
             })
-            .WithAnnotation(McpServerEndpointAnnotation.FromEndpoint(PostgresMcpContainerResource.PrimaryEndpointName, "/sse"))
+            .WithMcpServer("/sse", endpointName: PostgresMcpContainerResource.PrimaryEndpointName)
             .WithIconName("BrainCircuit") // Show a BrainCircuit icon for MCP resources in the dashboard
             .WaitFor(builder);
 
@@ -422,12 +436,28 @@ public static class PostgresBuilderExtensions
     /// <param name="name">The name of the volume. Defaults to an auto-generated name based on the application and resource names.</param>
     /// <param name="isReadOnly">A flag that indicates if this is a read-only volume.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// <para>
+    /// The data directory location varies by PostgreSQL version:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>PostgreSQL 17 and earlier: <c>/var/lib/postgresql/data</c></description></item>
+    ///   <item><description>PostgreSQL 18 and later: <c>/var/lib/postgresql</c></description></item>
+    /// </list>
+    /// <para>
+    /// This method automatically selects the correct path based on the configured container image tag.
+    /// </para>
+    /// </remarks>
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> WithDataVolume(this IResourceBuilder<PostgresServerResource> builder, string? name = null, bool isReadOnly = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        var dataPath = GetPostgresDataDirectoryPath(builder);
+
         return builder.WithVolume(name ?? VolumeNameGenerator.Generate(builder, "data"),
-            "/var/lib/postgresql/data", isReadOnly);
+            dataPath, isReadOnly);
     }
 
     /// <summary>
@@ -437,12 +467,28 @@ public static class PostgresBuilderExtensions
     /// <param name="source">The source directory on the host to mount into the container.</param>
     /// <param name="isReadOnly">A flag that indicates if this is a read-only mount.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// <para>
+    /// The data directory location varies by PostgreSQL version:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>PostgreSQL 17 and earlier: <c>/var/lib/postgresql/data</c></description></item>
+    ///   <item><description>PostgreSQL 18 and later: <c>/var/lib/postgresql</c></description></item>
+    /// </list>
+    /// <para>
+    /// This method automatically selects the correct path based on the configured container image tag.
+    /// </para>
+    /// </remarks>
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> WithDataBindMount(this IResourceBuilder<PostgresServerResource> builder, string source, bool isReadOnly = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrEmpty(source);
 
-        return builder.WithBindMount(source, "/var/lib/postgresql/data", isReadOnly);
+        var dataPath = GetPostgresDataDirectoryPath(builder);
+
+        return builder.WithBindMount(source, dataPath, isReadOnly);
     }
 
     /// <summary>
@@ -452,6 +498,8 @@ public static class PostgresBuilderExtensions
     /// <param name="source">The source directory on the host to mount into the container.</param>
     /// <param name="isReadOnly">A flag that indicates if this is a read-only mount.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>This method is not available in polyglot app hosts. Use <see cref="WithInitFiles"/> instead.</remarks>
+    [AspireExportIgnore(Reason = "Obsolete. Use WithInitFiles instead.")]
     [Obsolete("Use WithInitFiles instead.")]
     public static IResourceBuilder<PostgresServerResource> WithInitBindMount(this IResourceBuilder<PostgresServerResource> builder, string source, bool isReadOnly = true)
     {
@@ -467,6 +515,8 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder.</param>
     /// <param name="source">The source directory or files on the host to copy into the container.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> WithInitFiles(this IResourceBuilder<PostgresServerResource> builder, string source)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -485,11 +535,13 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The builder for the <see cref="PostgresDatabaseResource"/>.</param>
     /// <param name="script">The SQL script used to create the database.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
     /// <remarks>
     /// The script can only contain SQL statements applying to the default database like CREATE DATABASE. Custom statements like table creation
     /// and data insertion are not supported since they require a distinct connection to the newly created database.
     /// <value>Default script is <code>CREATE DATABASE "&lt;QUOTED_DATABASE_NAME&gt;"</code></value>
     /// </remarks>
+    [AspireExport]
     public static IResourceBuilder<PostgresDatabaseResource> WithCreationScript(this IResourceBuilder<PostgresDatabaseResource> builder, string script)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -506,6 +558,8 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder.</param>
     /// <param name="password">The parameter used to provide the password for the PostgreSQL resource.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> WithPassword(this IResourceBuilder<PostgresServerResource> builder, IResourceBuilder<ParameterResource> password)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -521,6 +575,8 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder.</param>
     /// <param name="userName">The parameter used to provide the user name for the PostgreSQL resource.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<PostgresServerResource> WithUserName(this IResourceBuilder<PostgresServerResource> builder, IResourceBuilder<ParameterResource> userName)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -536,6 +592,8 @@ public static class PostgresBuilderExtensions
     /// <param name="builder">The resource builder.</param>
     /// <param name="port">The port to bind on the host. If <see langword="null"/> is used random port will be assigned.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport("withPostgresHostPort", MethodName = "withHostPort")]
     public static IResourceBuilder<PostgresServerResource> WithHostPort(this IResourceBuilder<PostgresServerResource> builder, int? port)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -618,6 +676,51 @@ public static class PostgresBuilderExtensions
         writer.Flush();
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>
+    /// Gets the appropriate PostgreSQL data directory path based on the image version.
+    /// </summary>
+    /// <remarks>
+    /// PostgreSQL 18+ changed the data directory from /var/lib/postgresql/data to /var/lib/postgresql.
+    /// See https://github.com/docker-library/postgres/pull/1259 for more information.
+    /// </remarks>
+    internal static string GetPostgresDataDirectoryPath(IResourceBuilder<PostgresServerResource> builder)
+    {
+        if (builder.Resource.Annotations.OfType<ContainerImageAnnotation>().LastOrDefault() is { } imageAnnotation)
+        {
+            var tag = imageAnnotation.Tag ?? PostgresContainerImageTags.Tag;
+            if (TryParsePostgresMajorVersion(tag, out var majorVersion) && majorVersion >= 18)
+            {
+                return "/var/lib/postgresql";
+            }
+        }
+
+        return "/var/lib/postgresql/data";
+    }
+
+    /// <summary>
+    /// Attempts to parse the PostgreSQL major version from an image tag.
+    /// </summary>
+    /// <param name="tag">The image tag (e.g., "17.6", "18.1", "18-alpine", "latest").</param>
+    /// <param name="majorVersion">The parsed major version number, if successful.</param>
+    /// <returns><see langword="true"/> if the major version was successfully parsed; otherwise, <see langword="false"/>.</returns>
+    internal static bool TryParsePostgresMajorVersion(string tag, out int majorVersion)
+    {
+        majorVersion = 0;
+
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            return false;
+        }
+
+        // Handle tags like "18.1-alpine", "17.6-bookworm", etc.
+        var versionPart = tag.Split('-')[0];
+
+        // Handle tags like "18.1", "17", etc.
+        var parts = versionPart.Split('.');
+
+        return parts.Length > 0 && int.TryParse(parts[0], out majorVersion) && majorVersion > 0;
     }
 
     private static async Task CreateDatabaseAsync(NpgsqlConnection npgsqlConnection, PostgresDatabaseResource npgsqlDatabase, IServiceProvider serviceProvider, CancellationToken cancellationToken)

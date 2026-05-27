@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AspireDebugSession } from '../debugger/AspireDebugSession';
+import type { VSCodeServerReadyAction } from '../debugger/vscode/serverReadyAction';
 
 export interface ErrorResponse {
     error: ErrorDetails;
@@ -16,6 +17,7 @@ type LaunchConfigurationMode = "Debug" | "NoDebug";
 export interface ExecutableLaunchConfiguration {
     type: string;
     mode?: LaunchConfigurationMode | undefined;
+    serverReadyAction?: VSCodeServerReadyAction;
 }
 
 export interface ProjectLaunchConfiguration extends ExecutableLaunchConfiguration {
@@ -38,10 +40,42 @@ export interface PythonLaunchConfiguration extends ExecutableLaunchConfiguration
 
     module?: string;
     interpreter_path?: string;
+    working_directory?: string;
 }
 
 export function isPythonLaunchConfiguration(obj: any): obj is PythonLaunchConfiguration {
     return obj && obj.type === 'python';
+}
+
+export interface NodeLaunchConfiguration extends ExecutableLaunchConfiguration {
+    type: "node"; // Provided by VS Code's built-in js-debug, no extension needed
+    script_path?: string;
+    runtime_executable?: string;
+    working_directory?: string;
+}
+
+export function isNodeLaunchConfiguration(obj: any): obj is NodeLaunchConfiguration {
+    return obj && obj.type === 'node';
+}
+
+export interface BrowserLaunchConfiguration extends ExecutableLaunchConfiguration {
+    type: "browser";
+    url?: string;
+    web_root?: string;
+    browser?: string;
+}
+
+export function isBrowserLaunchConfiguration(obj: any): obj is BrowserLaunchConfiguration {
+    return obj && obj.type === 'browser';
+}
+
+export interface AzureFunctionsLaunchConfiguration extends ExecutableLaunchConfiguration {
+    type: "azure-functions";
+    project_path: string;
+}
+
+export function isAzureFunctionsLaunchConfiguration(obj: any): obj is AzureFunctionsLaunchConfiguration {
+    return obj && obj.type === 'azure-functions';
 }
 
 export interface EnvVar {
@@ -53,6 +87,14 @@ export interface RunSessionPayload {
     launch_configurations: ExecutableLaunchConfiguration[];
     env?: EnvVar[];
     args?: string[];
+}
+
+export interface DebugLaunchSettings {
+    env?: { [key: string]: string };
+    args?: string[];
+    launchProfile?: string;
+    disableLaunchProfile?: boolean;
+    serverReadyAction?: VSCodeServerReadyAction;
 }
 
 export interface DcpServerConnectionInfo {
@@ -100,6 +142,10 @@ export interface LaunchOptions {
     debugSession: AspireDebugSession;
 };
 
+export interface StartAppHostOptions {
+    forceBuild: boolean;
+}
+
 export interface AspireResourceDebugSession {
     id: string;
     session: vscode.DebugSession;
@@ -110,15 +156,23 @@ export interface AspireResourceExtendedDebugConfiguration extends vscode.DebugCo
     runId: string;
     debugSessionId: string | null;
     projectFile?: string;
+    isApphost?: boolean;
+    serverReadyAction?: VSCodeServerReadyAction;
 }
+
+export type AspireCommandType = 'run' | 'deploy' | 'publish' | 'do';
 
 export interface AspireExtendedDebugConfiguration extends vscode.DebugConfiguration {
     program: string;
     debuggers?: AspireDebuggersConfiguration;
+    command?: AspireCommandType;
+    args?: string[];
+    step?: string;
+    env?: { [key: string]: string };
 }
 
 interface AspireDebuggersConfiguration {
-    [key: string]: Record<string, any>;
+    [key: string]: DebugLaunchSettings;
 }
 
 export interface RunSessionInfo {

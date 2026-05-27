@@ -1,16 +1,31 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Microsoft.Extensions.Logging;
 using System.Globalization;
+using Aspire.Cli.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace Aspire.Cli.Interaction;
 
-internal class SpectreConsoleLoggerProvider(IInteractionService interactionService) : ILoggerProvider
+internal class SpectreConsoleLoggerProvider : ILoggerProvider
 {
+    private readonly TextWriter _output;
+    private readonly ConsoleLogBufferContext _bufferContext;
+
+    /// <summary>
+    /// Creates a logger provider that writes to the specified output.
+    /// </summary>
+    /// <param name="output">The text writer to write log messages to.</param>
+    /// <param name="bufferContext">Shared buffer context for pausing logs during interactive prompts.</param>
+    public SpectreConsoleLoggerProvider(TextWriter output, ConsoleLogBufferContext bufferContext)
+    {
+        _output = output;
+        _bufferContext = bufferContext;
+    }
+
     public ILogger CreateLogger(string categoryName)
     {
-        return new SpectreConsoleLogger(interactionService, categoryName);
+        return new SpectreConsoleLogger(_output, categoryName, _bufferContext);
     }
 
     public void Dispose()
@@ -18,7 +33,7 @@ internal class SpectreConsoleLoggerProvider(IInteractionService interactionServi
     }
 }
 
-internal class SpectreConsoleLogger(IInteractionService interactionService, string categoryName) : ILogger
+internal class SpectreConsoleLogger(TextWriter output, string categoryName, ConsoleLogBufferContext bufferContext) : ILogger
 {
     public bool IsEnabled(LogLevel logLevel) =>
         logLevel >= LogLevel.Debug &&
@@ -42,35 +57,16 @@ internal class SpectreConsoleLogger(IInteractionService interactionService, stri
         var formattedMessage = exception is not null ? $"{message} {exception}" : message;
 
         // Extract the last token from the category name to reduce noise
-        var shortCategoryName = GetShortCategoryName(categoryName);
+        var shortCategoryName = CliLogFormat.GetShortCategoryName(categoryName);
 
         // Format timestamp to show only time (HH:mm:ss) for debugging purposes
         var timestamp = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
-        // Use DisplaySubtleMessage for clean debug output
-        // If using extension host, use the console method directly
-        if (interactionService is ExtensionInteractionService extensionInteractionService)
-        {
-            extensionInteractionService.ConsoleDisplaySubtleMessage($"[{timestamp}] [{GetLogLevelString(logLevel)}] {shortCategoryName}: {formattedMessage}");
-            return;
-        }
+        var logMessage = $"[{timestamp}] [{GetLogLevelString(logLevel)}] {shortCategoryName}: {formattedMessage}";
 
-        interactionService.DisplaySubtleMessage($"[{timestamp}] [{GetLogLevelString(logLevel)}] {shortCategoryName}: {formattedMessage}");
+        // Write to the configured output (stderr by default)
+        bufferContext.WriteOrBuffer(output, logMessage);
     }
 
-    private static string GetLogLevelString(LogLevel logLevel) => logLevel switch
-    {
-        LogLevel.Debug => "dbug",
-        LogLevel.Information => "info",
-        LogLevel.Warning => "warn",
-        LogLevel.Error => "fail",
-        LogLevel.Critical => "crit",
-        _ => logLevel.ToString().ToLower()
-    };
-
-    private static string GetShortCategoryName(string categoryName)
-    {
-        var lastDotIndex = categoryName.LastIndexOf('.');
-        return lastDotIndex >= 0 ? categoryName.Substring(lastDotIndex + 1) : categoryName;
-    }
+    private static string GetLogLevelString(LogLevel logLevel) => CliLogFormat.GetConsoleLevelToken(logLevel);
 }

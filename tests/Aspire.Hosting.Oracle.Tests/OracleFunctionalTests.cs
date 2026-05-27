@@ -13,7 +13,7 @@ using Polly;
 
 namespace Aspire.Hosting.Oracle.Tests;
 
-[ActiveIssue("https://github.com/dotnet/aspire/issues/5362", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningOnCI))]
+[ActiveIssue("https://github.com/microsoft/aspire/issues/5362", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningOnCI))]
 public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
 {
     // Folders created for mounted folders need to be granted specific permissions
@@ -26,7 +26,7 @@ public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
     private const string DatabaseReadyText = "Completed: ALTER DATABASE OPEN";
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task VerifyEfOracle()
     {
         var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
@@ -69,8 +69,8 @@ public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
 
     [Theory]
     [InlineData(true)]
-    [InlineData(false, Skip = "https://github.com/dotnet/aspire/issues/5191")]
-    [RequiresDocker]
+    [InlineData(false, Skip = "https://github.com/microsoft/aspire/issues/5191")]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WithDataShouldPersistStateBetweenUsages(bool useVolume)
     {
         var oracleDbName = "freepdb1";
@@ -247,7 +247,7 @@ public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task VerifyWithInitBindMount()
     {
         // Creates a script that should be executed when the container is initialized.
@@ -344,8 +344,8 @@ public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
 
     [Theory]
     [InlineData(true)]
-    [InlineData(false, Skip = "https://github.com/dotnet/aspire/issues/5190")]
-    [RequiresDocker]
+    [InlineData(false, Skip = "https://github.com/microsoft/aspire/issues/5190")]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task VerifyWithInitFiles(bool init)
     {
         // Creates a script that should be executed when the container is initialized.
@@ -440,7 +440,7 @@ public class OracleFunctionalTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task VerifyWaitForOnOracleBlocksDependentResources()
     {
         var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));

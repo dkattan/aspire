@@ -67,11 +67,11 @@ for database exploration, query execution, index tuning, and health checks.
 
 ## Additional documentation
 
-https://learn.microsoft.com/dotnet/aspire/database/postgresql-component
-https://learn.microsoft.com/dotnet/aspire/database/postgresql-entity-framework-component
+https://aspire.dev/integrations/databases/postgres/postgres-get-started/
+https://aspire.dev/integrations/databases/efcore/postgresql/
 
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire
 
 _*Postgres, PostgreSQL and the Slonik Logo are trademarks or registered trademarks of the PostgreSQL Community Association of Canada, and used with their permission._

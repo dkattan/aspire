@@ -4,6 +4,7 @@
 using System.CommandLine;
 using Aspire.Cli.Configuration;
 using Aspire.Cli.Interaction;
+using Aspire.Cli.Telemetry;
 using Aspire.Cli.Templating;
 using Aspire.Cli.Utils;
 
@@ -11,10 +12,10 @@ namespace Aspire.Cli.Commands;
 
 internal sealed class TemplateCommand : BaseCommand
 {
-    private readonly Func<ParseResult, CancellationToken, Task<int>> _executeCallback;
+    private readonly Func<ParseResult, CancellationToken, Task<CommandResult>> _executeCallback;
 
-    public TemplateCommand(ITemplate template, Func<ParseResult, CancellationToken, Task<int>> executeCallback, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, IInteractionService interactionService)
-        : base(template.Name, template.Description, features, updateNotifier, executionContext, interactionService)
+    public TemplateCommand(ITemplate template, Func<ParseResult, CancellationToken, Task<CommandResult>> executeCallback, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, IInteractionService interactionService, AspireCliTelemetry telemetry)
+        : base(template.Name, template.Description, features, updateNotifier, executionContext, interactionService, telemetry)
     {
         ArgumentNullException.ThrowIfNull(template);
         ArgumentNullException.ThrowIfNull(executeCallback);
@@ -23,7 +24,11 @@ internal sealed class TemplateCommand : BaseCommand
         _executeCallback = executeCallback;
     }
 
-    protected override Task<int> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
+    // Template commands are user-facing interactive commands (e.g., `aspire new aspire-starter`)
+    // and should show update notifications, just like the parent NewCommand.
+    protected override bool UpdateNotificationsEnabled => true;
+
+    protected override Task<CommandResult> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
     {
         return _executeCallback(parseResult, cancellationToken);
     }

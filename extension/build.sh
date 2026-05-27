@@ -9,12 +9,6 @@ if ! command -v node &> /dev/null; then
     exit 1
 fi
 
-# Check for npm
-if ! command -v npm &> /dev/null; then
-    echo "Error: npm is not installed. Please install npm first."
-    exit 1
-fi
-
 # Check for yarn
 if ! command -v yarn &> /dev/null; then
     echo "Error: yarn is not installed. Please install yarn first."
@@ -37,9 +31,14 @@ if ! command -v dotnet &> /dev/null; then
 fi
 
 echo "All prerequisites satisfied."
+
+# Ensure we run from the extension directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo ""
 echo "Running yarn install..."
-yarn install
+yarn install --frozen-lockfile --non-interactive
 
 echo ""
 echo "Running yarn compile..."

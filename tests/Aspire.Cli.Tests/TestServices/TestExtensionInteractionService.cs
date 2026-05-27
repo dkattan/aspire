@@ -3,55 +3,88 @@
 
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Interaction;
+using Aspire.Cli.Utils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace Aspire.Cli.Tests.TestServices;
 
 internal sealed class TestExtensionInteractionService(IServiceProvider serviceProvider) : IExtensionInteractionService
 {
+    public ConsoleOutput Console { get; set; }
+    public bool SupportsLinks { get; set; }
     public Action<string>? DisplayErrorCallback { get; set; }
     public Action<string>? DisplaySubtleMessageCallback { get; set; }
     public Action<string>? DisplayConsoleWriteLineMessage { get; set; }
     public Action? LaunchAppHostCallback { get; set; }
     public Action? NotifyAppHostStartupCompletedCallback { get; set; }
     public Action<DashboardUrlsState>? DisplayDashboardUrlsCallback { get; set; }
-    public Action<string, string?, bool>? StartDebugSessionCallback { get; set; }
+    public Action<string, string?, bool, DebugSessionOptions?>? StartDebugSessionCallback { get; set; }
     public Action<string, bool>? ConsoleDisplaySubtleMessageCallback { get; set; }
+    public Func<string, bool, bool>? ConfirmCallback { get; set; }
+    public Func<string, IReadOnlyList<string>, string>? SelectionCallback { get; set; }
+    public Func<IRenderable, Func<Action<IRenderable>, Task>, Task>? DisplayLiveAsyncCallback { get; set; }
 
     public IExtensionBackchannel Backchannel { get; } = serviceProvider.GetRequiredService<IExtensionBackchannel>();
 
-    public Task<T> ShowStatusAsync<T>(string statusText, Func<Task<T>> action)
+    public Task<T> ShowStatusAsync<T>(string statusText, Func<Task<T>> action, KnownEmoji? emoji = null, bool allowMarkup = false)
     {
         return action();
     }
 
-    public void ShowStatus(string statusText, Action action)
+    public Task<T> ShowDynamicStatusAsync<T>(string initialStatusText, Func<Action<string>, Task<T>> action, KnownEmoji? emoji = null)
+    {
+        return action(_ => { });
+    }
+
+    public void ShowStatus(string statusText, Action action, KnownEmoji? emoji = null, bool allowMarkup = false)
     {
         action();
     }
 
-    public Task<string> PromptForStringAsync(string promptText, string? defaultValue = null, Func<string, ValidationResult>? validator = null, bool isSecret = false, bool required = false, CancellationToken cancellationToken = default)
+    public Task<string> PromptForStringAsync(string promptText, Func<string, ValidationResult>? validator = null, bool isSecret = false, bool required = false, PromptBinding<string?>? binding = null, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(defaultValue ?? string.Empty);
+        return Task.FromResult(binding?.DefaultValue ?? string.Empty);
     }
 
-    public Task<T> PromptForSelectionAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, CancellationToken cancellationToken = default) where T : notnull
+    public Task<string> PromptForFilePathAsync(string promptText, Func<string, ValidationResult>? validator = null, bool directory = false, bool required = false, PromptBinding<string?>? binding = null, CancellationToken cancellationToken = default)
+    {
+        return PromptForStringAsync(promptText, validator, isSecret: false, required, binding, cancellationToken);
+    }
+
+    public Task<T> PromptForSelectionAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, PromptBinding<string?>? binding = null, bool echoSelected = true, CancellationToken cancellationToken = default) where T : notnull
+    {
+        var choicesArray = choices.ToArray();
+        if (choicesArray.Length == 0)
+        {
+            throw new EmptyChoicesException($"No items available for selection: {promptText}");
+        }
+
+        if (SelectionCallback is not null)
+        {
+            var selected = SelectionCallback(promptText, choicesArray.Select(choiceFormatter).ToArray());
+            var matchingChoice = choicesArray.FirstOrDefault(c => string.Equals(choiceFormatter(c), selected, StringComparison.Ordinal));
+            if (matchingChoice is not null)
+            {
+                return Task.FromResult(matchingChoice);
+            }
+        }
+
+        return Task.FromResult(choicesArray.First());
+    }
+
+    public Task<IReadOnlyList<T>> PromptForSelectionsAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, IEnumerable<T>? preSelected = null, bool optional = false, PromptBinding<string?>? binding = null, bool echoSelected = true, CancellationToken cancellationToken = default) where T : notnull
     {
         if (!choices.Any())
         {
             throw new EmptyChoicesException($"No items available for selection: {promptText}");
         }
 
-        return Task.FromResult(choices.First());
-    }
-
-    public Task<IReadOnlyList<T>> PromptForSelectionsAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, CancellationToken cancellationToken = default) where T : notnull
-    {
-        if (!choices.Any())
+        if (preSelected is not null)
         {
-            throw new EmptyChoicesException($"No items available for selection: {promptText}");
+            return Task.FromResult<IReadOnlyList<T>>(preSelected.ToList());
         }
 
         return Task.FromResult<IReadOnlyList<T>>(choices.ToList());
@@ -62,16 +95,16 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
         return 0;
     }
 
-    public void DisplayError(string errorMessage)
+    public void DisplayError(string errorMessage, bool allowMarkup = false)
     {
         DisplayErrorCallback?.Invoke(errorMessage);
     }
 
-    public void DisplayMessage(string emoji, string message)
+    public void DisplayMessage(KnownEmoji emoji, string message, bool allowMarkup = false, ConsoleOutput? consoleOverride = null)
     {
     }
 
-    public void DisplaySuccess(string message)
+    public void DisplaySuccess(string message, bool allowMarkup = false)
     {
     }
 
@@ -90,9 +123,9 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
         DisplayConsoleWriteLineMessage?.Invoke(message);
     }
 
-    public Task StartDebugSessionAsync(string workingDirectory, string? projectFile, bool debug)
+    public Task StartDebugSessionAsync(string workingDirectory, string? projectFile, bool debug, DebugSessionOptions? options = null)
     {
-        StartDebugSessionCallback?.Invoke(workingDirectory, projectFile, debug);
+        StartDebugSessionCallback?.Invoke(workingDirectory, projectFile, debug, options);
         return Task.CompletedTask;
     }
 
@@ -100,20 +133,21 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
     {
     }
 
-    public void DisplayLines(IEnumerable<(string Stream, string Line)> lines)
+    public void DisplayLines(IEnumerable<(OutputLineStream Stream, string Line)> lines)
     {
     }
 
-    public void DisplayCancellationMessage()
+    public void DisplayCancellationMessage(ConsoleOutput? consoleOverride = null)
     {
     }
 
-    public Task<bool> ConfirmAsync(string promptText, bool defaultValue = true, CancellationToken cancellationToken = default)
+    public Task<bool> PromptConfirmAsync(string promptText, PromptBinding<bool>? binding = null, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(true);
+        var defaultValue = binding?.DefaultValue ?? false;
+        return Task.FromResult(ConfirmCallback?.Invoke(promptText, defaultValue) ?? true);
     }
 
-    public void DisplaySubtleMessage(string message, bool escapeMarkup = true)
+    public void DisplaySubtleMessage(string message, bool allowMarkup = false)
     {
         DisplaySubtleMessageCallback?.Invoke(message);
     }
@@ -126,11 +160,15 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
     {
     }
 
-    public void DisplayRawText(string text)
+    public void DisplayRawText(string text, ConsoleOutput? consoleOverride = null)
     {
     }
 
-    public void DisplayMarkdown(string markdown)
+    public void DisplayMarkdown(string markdown, ConsoleOutput? consoleOverride = null, int? maxWidth = null)
+    {
+    }
+
+    public void DisplayMarkupLine(string markup)
     {
     }
 
@@ -145,6 +183,20 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
     public void DisplayVersionUpdateNotification(string newerVersion, string? updateCommand = null)
     {
         DisplayVersionUpdateNotificationCallback?.Invoke(newerVersion);
+    }
+
+    public void DisplayRenderable(IRenderable renderable)
+    {
+    }
+
+    public Task DisplayLiveAsync(IRenderable initialRenderable, Func<Action<IRenderable>, Task> callback)
+    {
+        if (DisplayLiveAsyncCallback is not null)
+        {
+            return DisplayLiveAsyncCallback(initialRenderable, callback);
+        }
+
+        return callback(_ => { });
     }
 
     public Action<string>? OpenEditorCallback { get; set; }
@@ -175,8 +227,8 @@ internal sealed class TestExtensionInteractionService(IServiceProvider servicePr
         return Task.CompletedTask;
     }
 
-    public void ConsoleDisplaySubtleMessage(string message, bool escapeMarkup = true)
+    public void ConsoleDisplaySubtleMessage(string message, bool allowMarkup = false)
     {
-        ConsoleDisplaySubtleMessageCallback?.Invoke(message, escapeMarkup);
+        ConsoleDisplaySubtleMessageCallback?.Invoke(message, allowMarkup);
     }
 }

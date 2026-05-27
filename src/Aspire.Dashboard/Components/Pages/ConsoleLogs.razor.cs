@@ -8,16 +8,15 @@ using System.Globalization;
 using System.Threading.Channels;
 using Aspire.Dashboard.Components.Layout;
 using Aspire.Dashboard.Configuration;
-using Aspire.Dashboard.ConsoleLogs;
 using Aspire.Dashboard.Extensions;
 using Aspire.Dashboard.Model;
 using Aspire.Dashboard.Model.Assistant;
 using Aspire.Dashboard.Model.Otlp;
+using Aspire.Shared.ConsoleLogs;
 using Aspire.Dashboard.Otlp.Storage;
 using Aspire.Dashboard.Resources;
 using Aspire.Dashboard.Telemetry;
 using Aspire.Dashboard.Utils;
-using Aspire.Hosting.ConsoleLogs;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
@@ -28,6 +27,8 @@ namespace Aspire.Dashboard.Components.Pages;
 
 public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry, IAsyncDisposable, IPageWithSessionAndUrlState<ConsoleLogs.ConsoleLogsViewModel, ConsoleLogs.ConsoleLogsPageState>
 {
+    private static readonly TimeSpan s_noLogsMessageDelay = TimeSpan.FromSeconds(1.5);
+
     [DebuggerDisplay("Resource = {Resource.Name}, IsCancellationRequested = {CancellationToken.IsCancellationRequested}")]
     private sealed class ConsoleLogsSubscription
     {
@@ -99,9 +100,6 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     public required IStringLocalizer<Dashboard.Resources.AIPrompts> AIPromptsLoc { get; init; }
 
     [Inject]
-    public required IStringLocalizer<Commands> CommandsLoc { get; init; }
-
-    [Inject]
     public required IStringLocalizer<ControlsStrings> ControlsStringsLoc { get; init; }
 
     [Inject]
@@ -131,6 +129,12 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     [Inject]
     public required IconResolver IconResolver { get; init; }
 
+    [Inject]
+    public required DashboardDialogService DialogService { get; init; }
+
+    [Inject]
+    public required ResourceMenuBuilder ResourceMenuBuilder { get; init; }
+
     [CascadingParameter]
     public required ViewportInformation ViewportInformation { get; init; }
 
@@ -154,6 +158,8 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     private bool _isSubscribedToAll;
     internal LogEntries _logEntries = null!;
     private readonly object _updateLogsLock = new object();
+    private CancellationTokenSource? _showNoLogsMessageCts;
+    private Task? _showNoLogsMessageDelayTask;
     private AIContext? _aiContext;
     private LogViewer? _logViewerRef;
 
@@ -169,6 +175,7 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     private bool _showTimestamp;
     private bool _isTimestampUtc;
     private bool _noWrapLogs;
+    private bool _showNoLogsMessage;
     public ConsoleLogsViewModel PageViewModel { get; set; } = null!;
     private IDisposable? _consoleLogsFiltersChangedSubscription;
 
@@ -306,6 +313,7 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     {
         await foreach (var batch in _logEntryChannel.GetBatchesAsync(minReadInterval: TimeSpan.FromMilliseconds(100), cancellationToken: _resourceSubscriptionToken))
         {
+            var hasNewLogEntry = false;
             lock (_updateLogsLock)
             {
                 foreach (var (resourceName, logEntry, lineNumber) in batch)
@@ -332,10 +340,19 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
                     }
 
                     _logEntries.InsertSorted(logEntry);
+                    hasNewLogEntry = true;
                 }
             }
 
-            await InvokeAsync(_logViewerRef.SafeRefreshDataAsync);
+            await InvokeAsync(async () =>
+            {
+                if (hasNewLogEntry)
+                {
+                    _showNoLogsMessage = false;
+                }
+
+                await _logViewerRef.SafeRefreshDataAsync();
+            });
         }
     }
 
@@ -401,6 +418,7 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
         {
             _logEntries.Clear(keepActivePauseEntries: false);
         }
+        ResetNoLogsMessage();
 
         await InvokeAsync(_logViewerRef.SafeRefreshDataAsync);
 
@@ -420,11 +438,16 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
         {
             Logger.LogDebug("Unexpected state. Unknown resource '{ResourceName}' selected.", selectedResourceName);
         }
+
+        if (!_consoleLogsSubscriptions.IsEmpty)
+        {
+            StartNoLogsMessageDelay();
+        }
     }
 
     private bool IsAllSelected()
     {
-        return PageViewModel.SelectedResource == _allResource;
+        return PageViewModel?.SelectedResource is not null && PageViewModel.SelectedResource == _allResource;
     }
 
     private void UpdateMenuButtons()
@@ -448,27 +471,27 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
 
         var selectedResource = GetSelectedResource();
 
-        CommonMenuItems.AddToggleHiddenResourcesMenuItem(
-            _logsMenuItems,
-            ControlsStringsLoc,
-            _showHiddenResources,
-            _resourceByName.Values,
-            SessionStorage,
-            EventCallback.Factory.Create<bool>(this, async
-            value =>
-            {
-                _showHiddenResources = value;
-                UpdateResourcesList();
-                UpdateMenuButtons();
-
-                if (!_showHiddenResources && selectedResource?.IsResourceHidden(showHiddenResources: false) is true)
+        // Only show the "Hide hidden resources" menu item when viewing all resources
+        // Use IsAllSelected() instead of _isSubscribedToAll because UpdateMenuButtons()
+        // can be called before the subscription is established
+        if (IsAllSelected())
+        {
+            CommonMenuItems.AddToggleHiddenResourcesMenuItem(
+                _logsMenuItems,
+                ControlsStringsLoc,
+                _showHiddenResources,
+                _resourceByName.Values,
+                SessionStorage,
+                EventCallback.Factory.Create<bool>(this, async
+                value =>
                 {
-                    PageViewModel.SelectedResource = _allResource;
-                    await this.AfterViewModelChangedAsync(_contentLayout, false);
-                }
+                    _showHiddenResources = value;
+                    UpdateResourcesList();
+                    UpdateMenuButtons();
 
-                await this.RefreshIfMobileAsync(_contentLayout);
-            }));
+                    await this.RefreshIfMobileAsync(_contentLayout);
+                }));
+        }
 
         _logsMenuItems.Add(new()
         {
@@ -499,18 +522,10 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
                 _highlightedCommands.AddRange(selectedResource.Commands.Where(c => c.IsHighlighted && c.State != CommandViewModelState.Hidden).Take(DashboardUIHelpers.MaxHighlightedCommands));
             }
 
-            ResourceMenuItems.AddMenuItems(
+            ResourceMenuBuilder.AddMenuItems(
                 _resourceMenuItems,
                 selectedResource,
-                NavigationManager,
-                TelemetryRepository,
-                AIContextProvider,
-                GetResourceName,
-                ControlsStringsLoc,
-                ResourcesLoc,
-                AIAssistantLoc,
-                AIPromptsLoc,
-                CommandsLoc,
+                _resourceByName,
                 EventCallback.Factory.Create(this, () =>
                 {
                     NavigationManager.NavigateTo(DashboardUrls.ResourcesUrl(resource: selectedResource.Name));
@@ -518,9 +533,9 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
                 }),
                 EventCallback.Factory.Create<CommandViewModel>(this, ExecuteResourceCommandAsync),
                 (resource, command) => DashboardCommandExecutor.IsExecuting(resource.Name, command.Name),
+                showViewDetails: true,
                 showConsoleLogsItem: false,
-                showUrls: true,
-                IconResolver);
+                showUrls: true);
         }
     }
 
@@ -648,6 +663,50 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
         }
 
         return Task.CompletedTask;
+    }
+
+    private void StartNoLogsMessageDelay()
+    {
+        ResetNoLogsMessage();
+
+        _showNoLogsMessageCts = new();
+        _showNoLogsMessageDelayTask = ShowNoLogsMessageAfterDelayAsync(_showNoLogsMessageCts.Token);
+    }
+
+    private void ResetNoLogsMessage()
+    {
+        _showNoLogsMessageCts?.Cancel();
+        _showNoLogsMessage = false;
+    }
+
+    private async Task ShowNoLogsMessageAfterDelayAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(s_noLogsMessageDelay, cancellationToken);
+
+            await InvokeAsync(() =>
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    var hasNoLogEntries = false;
+                    lock (_updateLogsLock)
+                    {
+                        hasNoLogEntries = _logEntries.EntriesCount == 0;
+                    }
+
+                    _showNoLogsMessage = hasNoLogEntries;
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to show the no logs message.");
+        }
     }
 
     private string GetResourceName(ResourceViewModel resource) => ResourceViewModel.GetResourceName(resource, _resourceByName);
@@ -783,9 +842,9 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
                     }
                 }
 
-                var resourcePrefix = ResourceViewModel.GetResourceName(subscription.Resource, _resourceByName, _showHiddenResources);
+                var resourcePrefix = ResourceViewModel.GetResourceName(subscription.Resource, _resourceByName);
 
-                var logParser = new LogParser(ConsoleColor.Black);
+                var logParser = new LogParser(ConsoleColor.Black, encodeForHtml: true);
                 await foreach (var batch in logSubscription.ConfigureAwait(false))
                 {
                     subscription.CancellationToken.ThrowIfCancellationRequested();
@@ -966,6 +1025,9 @@ public sealed partial class ConsoleLogs : ComponentBase, IComponentWithTelemetry
     public async ValueTask DisposeAsync()
     {
         _aiContext?.Dispose();
+        ResetNoLogsMessage();
+        _showNoLogsMessageCts?.Cancel();
+        await TaskHelpers.WaitIgnoreCancelAsync(_showNoLogsMessageDelayTask);
 
         _consoleLogsFiltersChangedSubscription?.Dispose();
 

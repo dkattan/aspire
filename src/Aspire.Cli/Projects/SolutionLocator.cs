@@ -4,6 +4,7 @@
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Resources;
 using Microsoft.Extensions.Logging;
+using Spectre.Console;
 
 namespace Aspire.Cli.Projects;
 
@@ -39,8 +40,8 @@ internal sealed class SolutionLocator(ILogger<SolutionLocator> logger, IInteract
             var selectedSolution = await interactionService.PromptForSelectionAsync(
                 InitCommandStrings.MultipleSolutionsFound,
                 solutionFiles,
-                solutionFile => $"{solutionFile.Name} ({Path.GetRelativePath(startDirectory.FullName, solutionFile.FullName)})",
-                cancellationToken);
+                solutionFile => $"{solutionFile.Name.EscapeMarkup()} ({Path.GetRelativePath(startDirectory.FullName, solutionFile.FullName).EscapeMarkup()})",
+                cancellationToken: cancellationToken);
             
             return selectedSolution;
         }
