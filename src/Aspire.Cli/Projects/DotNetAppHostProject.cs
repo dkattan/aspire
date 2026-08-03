@@ -320,7 +320,11 @@ internal sealed class DotNetAppHostProject : IAppHostProject
             StandardOutputCallback = runOutputCollector.AppendOutput,
             StandardErrorCallback = runOutputCollector.AppendError,
             StartDebugSession = context.StartDebugSession,
-            Debug = context.Debug
+            Debug = context.Debug,
+            ForwardToConsole = string.Equals(
+                Environment.GetEnvironmentVariable(KnownConfigNames.ForwardAppHostOutput),
+                "true",
+                StringComparison.OrdinalIgnoreCase),
         };
 
         // The backchannel completion source is the contract with RunCommand

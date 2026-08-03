@@ -158,6 +158,14 @@ internal sealed class ProcessExecution : IProcessExecution
             identifier
             );
 
+        var forwardToConsole = _options.ForwardToConsole;
+        TextWriter? consoleWriter = identifier switch
+        {
+            "stdout" when forwardToConsole => Console.Out,
+            "stderr" when forwardToConsole => Console.Error,
+            _ => null
+        };
+
         try
         {
             string? line;
@@ -176,6 +184,11 @@ internal sealed class ProcessExecution : IProcessExecution
                         );
                 }
                 lineCallback?.Invoke(line);
+                if (consoleWriter is not null)
+                {
+                    consoleWriter.WriteLine(line);
+                    consoleWriter.Flush();
+                }
                 RecordForwarderActivity();
             }
         }

@@ -39,6 +39,7 @@ internal static class KnownConfigNames
     public const string IntegrationLibsPath = "ASPIRE_INTEGRATION_LIBS_PATH";
     public const string IntegrationProbeManifestPath = "ASPIRE_INTEGRATION_PROBE_MANIFEST_PATH";
     public const string ForceRichConsole = "ASPIRE_FORCE_RICH_CONSOLE";
+    public const string ForwardAppHostOutput = "ASPIRE_FORWARD_APPHOST_OUTPUT";
     public const string AppHostLogLevel = "ASPIRE_APPHOST_LOGLEVEL";
     public const string AspireLogLevel = "ASPIRE_LOGLEVEL";
     public const string TestingDisableHttpClient = "ASPIRE_TESTING_DISABLE_HTTP_CLIENT";

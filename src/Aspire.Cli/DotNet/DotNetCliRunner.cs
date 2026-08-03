@@ -59,6 +59,13 @@ internal sealed class ProcessInvocationOptions
     /// Useful for background operations like NuGet package cache refreshes.
     /// </summary>
     public bool SuppressLogging { get; set; }
+
+    /// <summary>
+    /// When true, forwards process stdout/stderr to the CLI's Console.Out/Console.Error
+    /// in addition to capturing it in the OutputCollector. Used by ASPIRE_FORWARD_APPHOST_OUTPUT
+    /// to make AppHost output visible to tools like Playwright that monitor the CLI's stdout.
+    /// </summary>
+    public bool ForwardToConsole { get; set; }
 }
 
 internal sealed class DotNetCliRunner(
@@ -270,6 +277,7 @@ internal sealed class DotNetCliRunner(
             StartDebugSession = options.StartDebugSession,
             Debug = options.Debug,
             SuppressLogging = options.SuppressLogging,
+            ForwardToConsole = options.ForwardToConsole,
             StandardOutputCallback = line =>
             {
                 var lineCount = Interlocked.Increment(ref outputCounters.StdoutLineCount);
